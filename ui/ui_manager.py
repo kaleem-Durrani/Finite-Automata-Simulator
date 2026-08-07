@@ -5,9 +5,11 @@ This module manages all UI components including toolbars, input fields,
 context menus, and help panels.
 """
 
-import pygame
-from typing import Dict, List, Optional, Tuple, Set, Any
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+import pygame
+
 from core.dfa import DFA
 
 
@@ -129,7 +131,7 @@ class UIManager:
         Returns:
             Dictionary of actions to be handled by the main application
         """
-        actions = {}
+        actions: Dict[str, Any] = {}
         
         if event.type == pygame.MOUSEBUTTONDOWN:
             actions.update(self._handle_mouse_down(event))
@@ -144,7 +146,7 @@ class UIManager:
 
     def _handle_mouse_wheel(self, event) -> Dict[str, Any]:
         """Handle mouse wheel events."""
-        actions = {}
+        actions: Dict[str, Any] = {}
 
         # Check if scrolling in help panel
         if self.show_help:
@@ -163,7 +165,7 @@ class UIManager:
     
     def _handle_mouse_down(self, event) -> Dict[str, Any]:
         """Handle mouse button down events."""
-        actions = {}
+        actions: Dict[str, Any] = {}
 
         # Only handle left clicks in UI
         if event.button != 1:
@@ -248,7 +250,7 @@ class UIManager:
     
     def _handle_key_down(self, event) -> Dict[str, Any]:
         """Handle key down events."""
-        actions = {}
+        actions: Dict[str, Any] = {}
 
         if self.adding_symbol:
             # Handle symbol addition dialog
@@ -287,7 +289,7 @@ class UIManager:
     
     def _handle_key_up(self, event) -> Dict[str, Any]:
         """Handle key up events."""
-        actions = {}
+        actions: Dict[str, Any] = {}
         
         if event.key == pygame.K_BACKSPACE:
             actions['backspace_stop'] = True
@@ -387,7 +389,8 @@ class UIManager:
 
         # Test button with hover effect
         mouse_pos = pygame.mouse.get_pos()
-        button_color = self.colors['button_hover'] if self.test_button_rect.collidepoint(mouse_pos) else self.colors['button_normal']
+        button_color = (self.colors['button_hover'] if self.test_button_rect.collidepoint(mouse_pos)
+                        else self.colors['button_normal'])
         pygame.draw.rect(self.screen, button_color, self.test_button_rect)
         pygame.draw.rect(self.screen, self.colors['ui_border'], self.test_button_rect, 2)
 
@@ -405,7 +408,7 @@ class UIManager:
             result_text = self.font_medium.render(test_result, True, result_color)
             self.screen.blit(result_text, (320, self.screen_height - 95))
 
-    def _draw_alphabet_selector(self, dfa: DFA):
+    def _draw_alphabet_selector(self, _dfa: DFA):
         """Draw the alphabet selector with available symbols."""
         # Clear previous button rects
         self.symbol_buttons.clear()
@@ -487,8 +490,9 @@ class UIManager:
     def _draw_animation_controls_in_status(self, x: int, y: int):
         """Draw animation controls inside the status box."""
         # Animation status
-        status_text = "Animation: ON" if hasattr(self, '_animation_active') and self._animation_active else "Animation: OFF"
-        status_color = self.colors['success'] if hasattr(self, '_animation_active') and self._animation_active else self.colors['error']
+        animating = getattr(self, '_animation_active', False)
+        status_text = "Animation: ON" if animating else "Animation: OFF"
+        status_color = self.colors['success'] if animating else self.colors['error']
         status_surface = self.font_small.render(status_text, True, status_color)
         self.screen.blit(status_surface, (x, y))
 
@@ -685,9 +689,6 @@ class UIManager:
         line_height = 18
         visible_lines = content_height // line_height
 
-        # Create a clipping area for the content
-        content_rect = pygame.Rect(panel_x + 10, content_y, panel_width - 20, content_height)
-
         # Calculate which lines to show based on scroll offset
         start_line = max(0, self.help_scroll_offset)
         end_line = min(len(help_lines), start_line + visible_lines)
@@ -725,7 +726,8 @@ class UIManager:
 
             # Scroll thumb
             thumb_height = max(20, int(scrollbar_height * visible_lines / len(help_lines)))
-            thumb_y = content_y + int((scrollbar_height - thumb_height) * start_line / (len(help_lines) - visible_lines))
+            thumb_y = content_y + int((scrollbar_height - thumb_height) * start_line
+                                      / (len(help_lines) - visible_lines))
             thumb_rect = pygame.Rect(scrollbar_x + 1, thumb_y, 8, thumb_height)
             pygame.draw.rect(self.screen, self.colors['button_normal'], thumb_rect)
 
@@ -877,7 +879,7 @@ class UIManager:
             current_char = execution_string[execution_step]
             step_text = f"Step {execution_step + 1}/{len(execution_string)}: Reading '{current_char}'"
         else:
-            step_text = f"Finished processing string"
+            step_text = "Finished processing string"
 
         step_surface = self.font_small.render(step_text, True, self.colors['text'])
         self.screen.blit(step_surface, (panel_x + 10, panel_y + 35))

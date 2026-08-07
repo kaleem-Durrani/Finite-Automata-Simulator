@@ -56,21 +56,6 @@ class State:
         dy = point[1] - self.position[1]
         return (dx * dx + dy * dy) <= (self.radius * self.radius)
     
-    def get_rect(self) -> 'pygame.Rect':
-        """
-        Get the bounding rectangle for this state.
-        
-        Returns:
-            pygame.Rect representing the state's bounding box
-        """
-        import pygame
-        return pygame.Rect(
-            self.position[0] - self.radius,
-            self.position[1] - self.radius,
-            self.radius * 2,
-            self.radius * 2
-        )
-    
     def distance_to(self, other: 'State') -> float:
         """
         Calculate the distance to another state.

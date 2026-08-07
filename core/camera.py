@@ -5,7 +5,7 @@ This module provides camera functionality for panning and zooming
 the view of the automaton workspace.
 """
 
-from typing import Tuple
+from typing import Sequence, Tuple
 
 
 class Camera:
@@ -37,7 +37,7 @@ class Camera:
         self.min_zoom = 0.1  # Maximum zoom out
         self.max_zoom = 5.0  # Maximum zoom in
         
-    def world_to_screen(self, world_pos: Tuple[float, float]) -> Tuple[float, float]:
+    def world_to_screen(self, world_pos: Sequence[float]) -> Tuple[float, float]:
         """
         Convert world coordinates to screen coordinates.
         

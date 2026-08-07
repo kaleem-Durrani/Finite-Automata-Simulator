@@ -5,11 +5,13 @@ This module handles all rendering operations including states, transitions,
 and UI elements with proper resource management and optimization.
 """
 
-import pygame
 import math
-from typing import Tuple, Dict, Any
-from core.state import State, StateType
+from typing import Tuple
+
+import pygame
+
 from core.camera import Camera
+from core.state import State, StateType
 
 
 class Renderer:

@@ -5,15 +5,14 @@ This is the entry point that coordinates all components and handles
 the main game loop, event processing, and application state.
 """
 
-import pygame
 import sys
-import os
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
+
+import pygame
 
 # Import our modules
 from core.dfa import DFA
-from core.state import State, StateType
-from core.camera import Camera
+from core.state import StateType
 from rendering.renderer import Renderer
 from ui.ui_manager import UIManager
 
@@ -350,7 +349,7 @@ class AutomatonSimulator:
             return True
         return False
 
-    def _handle_left_release(self, pos: Tuple[int, int]):
+    def _handle_left_release(self, _pos: Tuple[int, int]):
         """Handle left mouse button release."""
         if self.dragging_state:
             self._stop_dragging()
@@ -501,8 +500,6 @@ class AutomatonSimulator:
         self.execution_path = []
         self.animation_active = False
         self.animation_auto_advance = False
-        self.animation_active = False
-        self.animation_auto_advance = False
 
     def _toggle_animation(self):
         """Toggle animation mode for execution."""
@@ -539,8 +536,6 @@ class AutomatonSimulator:
 
     def _show_state_context_menu(self, pos: Tuple[int, int], state_id: str):
         """Show context menu for a state."""
-        state = self.dfa.states[state_id]
-
         items = [
             ("Set as Accept State", f"set_accept:{state_id}"),
             ("Set as Dead End", f"set_dead_end:{state_id}"),

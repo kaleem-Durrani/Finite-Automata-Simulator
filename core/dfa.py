@@ -6,7 +6,8 @@ finite automaton with states, transitions, and processing logic.
 """
 
 import json
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 from .state import State, StateType
 
 
