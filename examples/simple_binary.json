@@ -1,0 +1,35 @@
+{
+  "states": {
+    "q0": {
+      "position": [200, 200],
+      "state_type": "normal"
+    },
+    "q1": {
+      "position": [400, 200],
+      "state_type": "accept"
+    },
+    "q2": {
+      "position": [300, 350],
+      "state_type": "dead_end"
+    }
+  },
+  "transitions": {
+    "q0": {
+      "0": "q0",
+      "1": "q1"
+    },
+    "q1": {
+      "0": "q2",
+      "1": "q1"
+    },
+    "q2": {
+      "0": "q2",
+      "1": "q2"
+    }
+  },
+  "alphabet": ["0", "1"],
+  "initial_state": "q0",
+  "accept_states": ["q1"],
+  "dead_end_states": ["q2"],
+  "next_state_id": 3
+}
