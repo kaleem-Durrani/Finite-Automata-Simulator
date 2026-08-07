@@ -1,0 +1,68 @@
+[project]
+name = "finite-automata-simulator"
+version = "0.1.0.dev0"
+description = "A visual editor and step-through simulator for deterministic finite automata"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+authors = [{ name = "Kaleem Durrani" }]
+keywords = ["automata", "dfa", "finite-state-machine", "theory-of-computation", "education"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Education",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+
+# The automata engine is intended to stay dependency-free. Pygame is only
+# needed by the GUI front-end, so it lives in an extra rather than here.
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["pygame>=2.6,<3"]
+dev = ["ruff>=0.16", "mypy>=1.11", "pytest>=8.0"]
+
+[project.urls]
+Repository = "https://github.com/kaleem-Durrani/Finite-Automata-Simulator"
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [".git", "__pycache__", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "F",   # pyflakes: undefined names, unused imports, unused locals
+    "E",   # pycodestyle errors
+    "I",   # import ordering
+    "ARG", # unused arguments
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "rendering", "ui"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["core", "rendering", "ui", "main.py", "tests"]
+# The existing GUI code is not annotated well enough for strict mode yet.
+# Strictness is raised package by package as each one is rewritten; the
+# automata engine extracted in a later phase starts out strict.
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "pygame.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# Pygame needs a video driver even headlessly; tests/conftest.py sets
+# SDL_VIDEODRIVER=dummy before pygame is imported.
