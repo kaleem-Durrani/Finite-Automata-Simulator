@@ -12,6 +12,8 @@ from pathlib import Path
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
-# The project is not installed as a package yet, so tests import the modules
-# directly from the repository root.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# The GUI modules still live at the repository root; the engine lives under
+# src/. Both are put on the path so tests can run without an editable install.
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "src"))

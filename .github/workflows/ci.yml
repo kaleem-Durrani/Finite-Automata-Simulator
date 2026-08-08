@@ -29,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "pygame>=2.6,<3" ruff mypy pytest
+          pip install "pygame>=2.6,<3" ruff mypy pytest pytest-cov
 
       - name: Lint
         run: ruff check .
@@ -37,17 +37,35 @@ jobs:
       - name: Type check
         run: mypy
 
+      - name: Type check the engine strictly
+        run: mypy --strict src/fsa
+
       - name: Test
         run: pytest
 
-      # The automata engine has to stay usable without a display. This guard
-      # is the architectural boundary, enforced mechanically rather than by
-      # discipline. It currently protects core/; when the engine is extracted
-      # into src/fsa/ the path below moves with it.
+      - name: Engine coverage
+        run: pytest tests/test_engine.py tests/test_conformance.py --cov=fsa --cov-branch --cov-fail-under=90
+
+      - name: Documented examples must run
+        run: cd src && python -m doctest fsa/__init__.py
+
+      # The engine has to stay usable without a display, and dependency-free.
+      # This is the architectural boundary stated as a build failure rather
+      # than as a convention.
       - name: Engine must not depend on pygame
         run: |
-          if grep -rn "pygame" core/; then
-            echo "::error::pygame referenced inside core/ -- the engine must stay display-free"
+          if grep -rn "pygame" src/fsa/ core/; then
+            echo "::error::pygame referenced in the engine -- it must stay display-free"
             exit 1
           fi
-          echo "core/ is pygame-free"
+          echo "engine is pygame-free"
+
+      - name: Engine must import with no third-party packages available
+        run: |
+          cd src && python -c "
+          import sys
+          for blocked in ('pygame', 'networkx', 'numpy'):
+              sys.modules[blocked] = None
+          import fsa
+          print(f'fsa imports clean, {len(fsa.__all__)} public names')
+          "
