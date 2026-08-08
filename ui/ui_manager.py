@@ -37,9 +37,10 @@ HELP_LINES = [
     "Keyboard Shortcuts:",
     "- Space: Add state at center",
     "- Delete: Remove selected state",
-    "- Q: Toggle accept state",
-    "- W: Toggle dead end state",
-    "- R: Reset camera view",
+    "- Q: Toggle accepting",
+    "- W: Make a trap (loop all",
+    "  symbols back to itself)",
+    "- R: Fit view to automaton",
     "",
     "Creating Transitions:",
     "- Select symbol from toolbar",
@@ -63,15 +64,23 @@ HELP_LINES = [
 ]
 
 
-CONTEXT_MENU_WIDTH = 150
-CONTEXT_MENU_ITEM_HEIGHT = 25
+CONTEXT_MENU_WIDTH = 168
+CONTEXT_MENU_ITEM_HEIGHT = 27
+# Left inset for item labels, leaving room for the toggle marker.
+CONTEXT_MENU_GUTTER = 28
 
 
 @dataclass
 class ContextMenu:
-    """Represents a context menu with items and position."""
+    """A context menu: a position and a list of items.
+
+    An item is ``(label, action)``, or ``(label, action, checked)`` for a
+    toggle. Carrying the current value means the menu can show what a state
+    already is, rather than making the user pick something and look to find
+    out whether it changed anything.
+    """
     position: Tuple[int, int]
-    items: List[Tuple[str, str]]  # (label, action)
+    items: List[Tuple[Any, ...]]
     visible: bool = True
     selected_index: int = -1
 
@@ -151,6 +160,11 @@ class UIManager:
         # screen. Set by the app, which is what computes them.
         self.legend_dead = False
         self.legend_unreachable = False
+
+        # No accepting state means no string can ever be accepted. The canvas
+        # deliberately stays quiet about it -- marking every state dead would
+        # be true and useless -- so the status panel has to say it instead.
+        self.warn_no_accepting = False
 
     # Fonts and colours are read through the shared theme, so there is exactly
     # one definition of "the colour of a border" in the application.
@@ -936,19 +950,22 @@ class UIManager:
         self._section_label("Automaton", (info_x, info_y))
 
         rows = [
-            ("States", str(len(dfa.states))),
-            ("Alphabet", ", ".join(sorted(dfa.alphabet)) if dfa.alphabet else "empty"),
-            ("Start", dfa.initial_state or "none"),
-            ("Accepting", str(len(dfa.accept_states))),
+            ("States", str(len(dfa.states)), False),
+            ("Alphabet", ", ".join(sorted(dfa.alphabet)) if dfa.alphabet else "empty",
+             not dfa.alphabet),
+            ("Start", dfa.initial_state or "none", dfa.initial_state is None),
+            ("Accepting", str(len(dfa.accept_states)), self.warn_no_accepting),
         ]
 
         label_font = self.fonts.ui("small")
         value_font = self.fonts.ui("small_strong")
         row_y = info_y + 20
-        for label, value in rows:
+        for label, value, warn in rows:
             self.screen.blit(label_font.render(label, True, palette.text_muted),
                              (info_x, row_y))
             colour = palette.text if value not in ("none", "empty") else palette.text_faint
+            if warn:
+                colour = palette.warning
             surface = value_font.render(value, True, colour)
             available = panel_rect.right - value_x - self.theme.space.md
             while surface.get_width() > available and len(value) > 4:
@@ -956,6 +973,13 @@ class UIManager:
                 surface = value_font.render(value, True, colour)
             self.screen.blit(surface, (value_x, row_y))
             row_y += 19
+
+        if self.warn_no_accepting:
+            self.screen.blit(
+                self.fonts.ui("small").render("No string can be accepted", True,
+                                              palette.warning),
+                (info_x, row_y))
+            row_y += 18
 
         self._draw_animation_controls_in_status(info_x, row_y + 8)
         self._draw_legend(dfa, panel_rect)
@@ -1186,7 +1210,9 @@ class UIManager:
 
         # Menu items
         mouse_pos = pygame.mouse.get_pos()
-        for i, (label, action) in enumerate(self.context_menu.items):
+        for i, item in enumerate(self.context_menu.items):
+            label, _action = item[0], item[1]
+            checked = item[2] if len(item) > 2 else None
             item_y = menu_y + i * item_height
             item_rect = pygame.Rect(menu_x, item_y, menu_width, item_height)
 
@@ -1204,8 +1230,18 @@ class UIManager:
             else:
                 colour = palette.error if label.startswith("Delete") else palette.text
                 text_surface = self.fonts.ui("small").render(label, True, colour)
-                text_rect = text_surface.get_rect(midleft=(menu_x + 10, item_y + item_height // 2))
+                text_rect = text_surface.get_rect(
+                    midleft=(menu_x + CONTEXT_MENU_GUTTER, item_y + item_height // 2))
                 self.screen.blit(text_surface, text_rect)
+
+                if checked is not None:
+                    centre = (menu_x + 15, item_y + item_height // 2)
+                    if checked:
+                        primitives.filled_circle(self.screen, centre, 5, palette.accent)
+                        primitives.filled_circle(self.screen, centre, 2,
+                                                 palette.panel_raised)
+                    else:
+                        primitives.ring(self.screen, centre, 5, 1, palette.border_strong)
 
     def _handle_context_menu_click(self, mouse_pos: Tuple[int, int]) -> Optional[str]:
         """Handle clicks on context menu items."""
@@ -1214,7 +1250,8 @@ class UIManager:
 
         menu_x, menu_y = self.context_menu.position
 
-        for i, (label, action) in enumerate(self.context_menu.items):
+        for i, item in enumerate(self.context_menu.items):
+            label, action = item[0], item[1]
             item_y = menu_y + i * CONTEXT_MENU_ITEM_HEIGHT
             item_rect = pygame.Rect(menu_x, item_y, CONTEXT_MENU_WIDTH,
                                     CONTEXT_MENU_ITEM_HEIGHT)
@@ -1224,7 +1261,8 @@ class UIManager:
 
         return None
 
-    def show_context_menu(self, position: Tuple[int, int], items: List[Tuple[str, str]]):
+    def show_context_menu(self, position: Tuple[int, int],
+                          items: List[Tuple[Any, ...]]):
         """
         Show a context menu at the specified position.
 

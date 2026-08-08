@@ -88,7 +88,7 @@ def test_context_menu_delete_clears_selection(app):
     assert app.selected_state is None
 
     app._toggle_accept_state()
-    app._toggle_dead_end_state()
+    app._make_selected_trap()
     pump(app)
 
 
@@ -853,6 +853,119 @@ def test_self_loops_point_away_from_other_edges(app):
 
     loop = next(e for e in app._build_scene().edges if e.key == ("q0", "q0"))
     assert all(point[1] > -1 for point in loop.path), "no part of it goes upward"
+
+
+def test_make_trap_actually_makes_a_trap(app):
+    """"Set as dead end" used to set a flag nothing read.
+
+    Trap-ness is derived from the transition function now, so the menu item had
+    no visible effect at all. It does the real thing instead: loop every symbol
+    back to the state, which genuinely traps it.
+    """
+    # Another state must still accept, or the automaton has no accepting state
+    # at all and nothing is reported as a trap -- correctly, but that is a
+    # different situation, covered by its own test.
+    app.dfa.set_state_type("q0", StateType.ACCEPT)
+    app._select_state("q1")
+    assert "q1" in app.dfa.accept_states
+
+    app._make_selected_trap()
+
+    outgoing = app.dfa.transitions["q1"]
+    assert outgoing == {symbol: "q1" for symbol in app.dfa.alphabet}
+    assert "q1" not in app.dfa.accept_states
+
+    kinds = {node.id: node.kind for node in app._build_scene().nodes}
+    assert kinds["q1"] is NodeKind.DEAD, "and it now renders as one"
+
+
+def test_losing_the_last_accepting_state_is_visible(app):
+    """Trapping your only accepting state destroys the language.
+
+    Nothing should be marked dead in that case -- every state technically is --
+    but the status panel has to say so, or the change is silent.
+    """
+    app._select_state("q1")
+    app._make_selected_trap()
+
+    assert app.dfa.accept_states == set()
+
+    # Nothing is called a trap -- that would be every state. q2 does become
+    # unreachable, because q1 now loops on everything instead of leading there,
+    # and that is a real and separate fact.
+    kinds = {node.kind for node in app._build_scene().nodes}
+    assert NodeKind.DEAD not in kinds
+    assert kinds <= {NodeKind.NORMAL, NodeKind.UNREACHABLE}
+
+    assert app.ui_manager.warn_no_accepting is True
+    pump(app)
+
+    app.dfa.set_state_type("q0", StateType.ACCEPT)
+    app._invalidate_engine()
+    app._build_scene()
+    assert app.ui_manager.warn_no_accepting is False
+
+
+def test_make_trap_reports_what_it_did(app):
+    app._make_trap("q0")
+    assert "loops on" in app.message_text
+    assert "replacing" in app.message_text, "it overwrote q0's existing edges"
+
+
+def test_make_trap_needs_an_alphabet(app):
+    """With no symbols there is nothing to loop on; say so rather than no-op."""
+    app.dfa = type(app.dfa)()
+    app.dfa.add_state((0, 0))
+    app._invalidate_engine()
+
+    app._make_trap("q0")
+    assert "no symbols" in app.message_text
+
+
+def test_make_trap_ignores_unknown_states(app):
+    app._make_trap("nope")
+    app._make_trap(None)
+    pump(app)
+
+
+def test_context_menu_reports_every_action(app):
+    """Each item used to change something silently, or nothing at all."""
+    app._handle_context_menu_action("toggle_accept:q0")
+    assert "now accepting" in app.message_text
+    assert "q0" in app.dfa.accept_states
+
+    app._handle_context_menu_action("toggle_accept:q0")
+    assert "no longer accepting" in app.message_text
+    assert "q0" not in app.dfa.accept_states
+
+    app._handle_context_menu_action("set_initial:q2")
+    assert "initial state" in app.message_text
+
+    app._handle_context_menu_action("make_trap:q2")
+    assert "loops on" in app.message_text
+
+
+def test_state_menu_shows_what_the_state_already_is(app):
+    """A toggle that does not show its value makes the user guess and check."""
+    app._show_state_context_menu((300, 300), "q1")
+    items = {item[0]: item for item in app.ui_manager.context_menu.items}
+
+    assert items["Accepting"][2] is True, "q1 accepts in the demo"
+    assert items["Initial state"][2] is False
+
+    app.ui_manager.hide_context_menu()
+    app._show_state_context_menu((300, 300), "q0")
+    items = {item[0]: item for item in app.ui_manager.context_menu.items}
+    assert items["Accepting"][2] is False
+    assert items["Initial state"][2] is True, "q0 is the start state"
+
+
+def test_menu_items_without_a_toggle_still_work(app):
+    """Plain items are two-tuples; the marker column is optional."""
+    app._show_general_context_menu((300, 300))
+    for item in app.ui_manager.context_menu.items:
+        assert len(item) in (2, 3)
+    pump(app)
 
 
 def test_each_state_kind_is_visually_distinct():

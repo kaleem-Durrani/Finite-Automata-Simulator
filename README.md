@@ -59,7 +59,7 @@ python main.py
 | `Space` | Add a new state at the centre of the view |
 | `Delete` | Remove the selected state |
 | `Q` | Toggle the selected state as accepting |
-| `W` | Toggle the selected state as a trap state |
+| `W` | Make the selected state a trap (loop every symbol back to it) |
 | `R` | Fit the view to the automaton |
 | `N` / `P` | Next / previous step during execution |
 | `Tab` | Toggle automatic playback during execution |
@@ -69,15 +69,21 @@ Typing a symbol that is in the palette selects it for the next transition.
 
 ### Context menu
 
-Right-click a state to set it as accepting, as a trap state, as normal, or as the initial state,
-or to delete it. Right-click empty canvas to add a state there or reset the view.
+Right-click a state to toggle whether it accepts, make it the initial state, turn it into a trap,
+or delete it. The toggles show what the state already is. Right-click empty canvas to add a state
+there or fit the view.
+
+"Make a trap" is an operation, not a label: it removes the state's accepting status and points
+every symbol back at itself, which genuinely traps it. It then renders as a trap because it *is*
+one. There is no separate "dead end" flag to set — a state that looks like a trap in the diagram
+is one, and vice versa.
 
 ## Getting started
 
 1. Press `Space` a few times to add states.
 2. Pick a symbol from the palette at the top left.
 3. Shift+click a state to begin a transition, then click the target state.
-4. Right-click a state to mark it as accepting.
+4. Right-click a state and choose Accepting.
 5. Type a string into the input field at the bottom and press `Enter`.
 6. Press `N` and `P` to step through the run.
 

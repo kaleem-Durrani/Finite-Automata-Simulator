@@ -294,7 +294,7 @@ class AutomatonSimulator:
             self._toggle_accept_state()
             return
         elif event.key == pygame.K_w:
-            self._toggle_dead_end_state()
+            self._make_selected_trap()
             return
         elif event.key == pygame.K_r:
             self.renderer.camera.reset()
@@ -570,15 +570,41 @@ class AutomatonSimulator:
                 self.dfa.set_state_type(self.selected_state, StateType.ACCEPT)
             self._structural_change()
 
-    def _toggle_dead_end_state(self):
-        """Toggle the selected state between normal and dead end."""
-        state = self.dfa.states.get(self.selected_state) if self.selected_state else None
-        if state is not None:
-            if state.state_type == StateType.DEAD_END:
-                self.dfa.set_state_type(self.selected_state, StateType.NORMAL)
-            else:
-                self.dfa.set_state_type(self.selected_state, StateType.DEAD_END)
-            self._structural_change()
+    def _make_trap(self, state_id: Optional[str]):
+        """Turn a state into a real trap: self-loop on every symbol.
+
+        There used to be a "dead end" flag the user could set. It changed what
+        the simulator accepted without changing any transition, so the tool
+        computed a different language than the diagram showed. Trap-ness is now
+        derived from the transition function -- which left the menu item
+        setting a flag that nothing read, and doing nothing visible.
+
+        So this does the thing the flag pretended to mean. The state stops
+        accepting and every symbol loops back to it, which genuinely makes it a
+        trap, and it renders as one because it *is* one.
+        """
+        if state_id is None or state_id not in self.dfa.states:
+            return
+
+        alphabet = sorted(self.dfa.alphabet)
+        if not alphabet:
+            self._show_message("Add a transition first: there are no symbols to loop on")
+            return
+
+        replaced = sum(1 for symbol in alphabet
+                       if self.dfa.transitions.get(state_id, {}).get(symbol) not in (None, state_id))
+
+        self.dfa.set_state_type(state_id, StateType.NORMAL)
+        for symbol in alphabet:
+            self.dfa.add_transition(state_id, state_id, symbol)
+
+        self._structural_change()
+        detail = f", replacing {replaced} transition{'s' if replaced != 1 else ''}" if replaced else ""
+        self._show_message(f"{state_id} now loops on {', '.join(alphabet)}{detail}")
+
+    def _make_selected_trap(self):
+        """Keyboard shortcut for :meth:`_make_trap`."""
+        self._make_trap(self.selected_state)
 
     # ------------------------------------------------------------------
     # The engine
@@ -843,14 +869,17 @@ class AutomatonSimulator:
 
     def _show_state_context_menu(self, pos: Tuple[int, int], state_id: str):
         """Show context menu for a state."""
+        # Toggles carry their current value, so the menu says what the state
+        # already is instead of making the user guess and check.
         items = [
-            ("Set as Accept State", f"set_accept:{state_id}"),
-            ("Set as Dead End", f"set_dead_end:{state_id}"),
-            ("Set as Normal", f"set_normal:{state_id}"),
+            ("Accepting", f"toggle_accept:{state_id}",
+             state_id in self.dfa.accept_states),
+            ("Initial state", f"set_initial:{state_id}",
+             state_id == self.dfa.initial_state),
             ("---", ""),
-            ("Set as Initial", f"set_initial:{state_id}"),
+            ("Make a trap", f"make_trap:{state_id}"),
             ("---", ""),
-            ("Delete State", f"delete_state:{state_id}")
+            ("Delete state", f"delete_state:{state_id}"),
         ]
 
         self.ui_manager.show_context_menu(pos, items)
@@ -873,15 +902,16 @@ class AutomatonSimulator:
         # colon cannot silently truncate the payload.
         verb, _, payload = action.partition(":")
 
-        if verb == "set_accept":
-            self.dfa.set_state_type(payload, StateType.ACCEPT)
-            self._structural_change()
-        elif verb == "set_dead_end":
-            self.dfa.set_state_type(payload, StateType.DEAD_END)
-            self._structural_change()
-        elif verb == "set_normal":
-            self.dfa.set_state_type(payload, StateType.NORMAL)
-            self._structural_change()
+        if verb == "toggle_accept":
+            if payload in self.dfa.states:
+                now_accepting = payload not in self.dfa.accept_states
+                self.dfa.set_state_type(
+                    payload, StateType.ACCEPT if now_accepting else StateType.NORMAL)
+                self._structural_change()
+                self._show_message(
+                    f"{payload} is {'now accepting' if now_accepting else 'no longer accepting'}")
+        elif verb == "make_trap":
+            self._make_trap(payload)
         elif verb == "set_initial":
             if payload in self.dfa.states:
                 self.dfa.initial_state = payload
@@ -1117,6 +1147,7 @@ class AutomatonSimulator:
         scene = Scene()
         self.ui_manager.legend_dead = False
         self.ui_manager.legend_unreachable = False
+        self.ui_manager.warn_no_accepting = not self.dfa.accept_states
 
         edge_paths = self._edge_paths()
         for key, path in edge_paths.items():
