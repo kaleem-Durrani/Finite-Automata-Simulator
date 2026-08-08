@@ -16,7 +16,7 @@ which is a common mistake).
 """
 
 import math
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pygame
 import pygame.gfxdraw
@@ -83,6 +83,60 @@ def ring(surface: pygame.Surface, centre: Point, radius: float, width: float,
     pygame.gfxdraw.aacircle(surface, x, y, radius, color)
 
 
+# ----------------------------------------------------------------------
+# Stamps
+# ----------------------------------------------------------------------
+#
+# Some node chrome is expensive to draw and identical for every node of the
+# same kind, size and colour: a dashed ring is dozens of small polygons, and a
+# hatch needs two scratch surfaces. Drawing those per node per frame was the
+# single largest cost in the renderer -- 50 unreachable states cost twice what
+# 50 ordinary ones did, and grew faster.
+#
+# So each is rendered once into a small surface and blitted thereafter. The key
+# includes everything that affects the pixels, so a theme change or a zoom
+# simply produces a new entry rather than a stale one.
+
+_STAMPS: Dict[Tuple[Any, ...], pygame.Surface] = {}
+_STAMP_LIMIT = 192
+
+
+def clear_stamp_cache() -> None:
+    """Drop every cached stamp. Only tests should need this."""
+    _STAMPS.clear()
+
+
+def _stamp(key: Tuple[Any, ...], size: int,
+           draw: Callable[[pygame.Surface], None]) -> pygame.Surface:
+    """Fetch a cached stamp, drawing it on first use."""
+    cached = _STAMPS.get(key)
+    if cached is not None:
+        return cached
+
+    layer = pygame.Surface((size, size), pygame.SRCALPHA)
+    draw(layer)
+    if len(_STAMPS) >= _STAMP_LIMIT:
+        # A crude reset rather than an LRU: entries are cheap to rebuild, and
+        # the working set is a handful of radii per theme.
+        _STAMPS.clear()
+    _STAMPS[key] = layer
+    return layer
+
+
+def _blit_centred(surface: pygame.Surface, stamp: pygame.Surface,
+                  centre: Point) -> None:
+    """Blit a stamp centred on a point.
+
+    The destination is clamped like every other coordinate here. blit rejects
+    positions outside the int range rather than clipping, so a node far off
+    screen at high zoom would raise -- the same trap gfxdraw sets, reintroduced
+    when this drawing moved behind a cache.
+    """
+    x, y = _safe(centre)
+    surface.blit(stamp, (x - stamp.get_width() // 2,
+                         y - stamp.get_height() // 2))
+
+
 def dashed_ring(surface: pygame.Surface, centre: Point, radius: float,
                 width: float, color: Color, dashes: int = 16,
                 duty: float = 0.55) -> None:
@@ -91,22 +145,34 @@ def dashed_ring(surface: pygame.Surface, centre: Point, radius: float,
     Used for states no word can reach. A dash pattern is a *shape* difference,
     so it still reads when the colour does not -- in greyscale, on a projector,
     or to a colour-blind reader.
+
+    Cached: this is the same picture for every unreachable state at a given
+    size, and drawing it fresh each time made those states twice as expensive
+    to render as ordinary ones.
     """
     radius = int(radius)
+    width = max(1, int(round(width)))
     if radius < 2 or dashes < 1:
         return
 
-    span = 2 * math.pi / dashes
-    for i in range(dashes):
-        start = i * span
-        end = start + span * duty
-        steps = max(2, int(radius * span / 3))
-        arc = [
-            (centre[0] + math.cos(start + (end - start) * s / steps) * radius,
-             centre[1] + math.sin(start + (end - start) * s / steps) * radius)
-            for s in range(steps + 1)
-        ]
-        stroke_path(surface, arc, width, color)
+    size = radius * 2 + width * 2 + 4
+    key = ("dashes", radius, width, tuple(color), dashes, round(duty, 2))
+
+    def render(layer: pygame.Surface) -> None:
+        middle = size / 2
+        span = 2 * math.pi / dashes
+        for i in range(dashes):
+            start = i * span
+            end = start + span * duty
+            steps = max(2, int(radius * span / 3))
+            arc = [
+                (middle + math.cos(start + (end - start) * s / steps) * radius,
+                 middle + math.sin(start + (end - start) * s / steps) * radius)
+                for s in range(steps + 1)
+            ]
+            stroke_path(layer, arc, width, color)
+
+    _blit_centred(surface, _stamp(key, size, render), centre)
 
 
 def hatch_circle(surface: pygame.Surface, centre: Point, radius: float,
@@ -114,35 +180,41 @@ def hatch_circle(surface: pygame.Surface, centre: Point, radius: float,
                  angle: float = math.pi / 4) -> None:
     """Fill a circle with diagonal lines.
 
-    The second signal that marks a trap state, alongside its colour. Drawn on a
-    scratch surface and masked to the circle, because clipping each line to the
-    boundary analytically is more code for the same pixels.
+    The second signal marking a trap state, alongside its colour. Built by
+    drawing lines across a square and masking them to the circle -- clipping
+    each line analytically is more code for the same pixels.
+
+    Cached, because it allocated two surfaces every time it was called, which
+    for a canvas full of traps meant two allocations per node per frame.
     """
     radius = int(radius)
     if radius < 4:
         return
 
     size = radius * 2 + 2
-    layer = pygame.Surface((size, size), pygame.SRCALPHA)
+    key = ("hatch", radius, tuple(color), round(spacing, 1), width,
+           round(angle, 3))
 
-    direction = (math.cos(angle), math.sin(angle))
-    normal = (-direction[1], direction[0])
-    reach = size * 1.5
-    steps = int(reach / spacing)
-    for i in range(-steps, steps + 1):
-        offset_x = normal[0] * i * spacing + size / 2
-        offset_y = normal[1] * i * spacing + size / 2
-        pygame.draw.line(
-            layer, color,
-            (offset_x - direction[0] * reach, offset_y - direction[1] * reach),
-            (offset_x + direction[0] * reach, offset_y + direction[1] * reach),
-            width)
+    def render(layer: pygame.Surface) -> None:
+        direction = (math.cos(angle), math.sin(angle))
+        normal = (-direction[1], direction[0])
+        reach = size * 1.5
+        steps = int(reach / spacing)
+        for i in range(-steps, steps + 1):
+            offset_x = normal[0] * i * spacing + size / 2
+            offset_y = normal[1] * i * spacing + size / 2
+            pygame.draw.line(
+                layer, color,
+                (offset_x - direction[0] * reach, offset_y - direction[1] * reach),
+                (offset_x + direction[0] * reach, offset_y + direction[1] * reach),
+                width)
 
-    mask = pygame.Surface((size, size), pygame.SRCALPHA)
-    pygame.gfxdraw.filled_circle(mask, size // 2, size // 2, radius,
-                                 (255, 255, 255, 255))
-    layer.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
-    surface.blit(layer, (int(centre[0]) - size // 2, int(centre[1]) - size // 2))
+        mask = pygame.Surface((size, size), pygame.SRCALPHA)
+        pygame.gfxdraw.filled_circle(mask, size // 2, size // 2, radius,
+                                     (255, 255, 255, 255))
+        layer.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+
+    _blit_centred(surface, _stamp(key, size, render), centre)
 
 
 def soft_shadow(surface: pygame.Surface, centre: Point, radius: float,
