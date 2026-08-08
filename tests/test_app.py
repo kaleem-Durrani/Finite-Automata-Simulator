@@ -694,11 +694,85 @@ def test_added_symbol_gets_a_button_immediately(app):
     assert app.ui_manager.selected_symbol == "z"
 
 
-def test_result_colour_is_not_decided_by_user_input(app):
-    """The colour test matched 'accepted' anywhere in the message.
+def test_result_colour_comes_from_the_verdict_not_the_message(app):
+    """The colour used to be decided by searching the message for "accepted".
 
-    Testing the literal string 'accepted' produced a rejection painted green.
+    Testing the literal string 'accepted' therefore produced a rejection
+    painted green. The verdict is now carried separately, so the message text
+    -- which contains whatever the user typed -- cannot influence it.
     """
     app._test_string("accepted")
-    assert app.ui_manager.test_result.endswith("REJECTED")
+    assert app.ui_manager.test_verdict != "accept"
+    assert "accepted" in app.ui_manager.test_result, "the message quotes the input"
     pump(app)
+
+    app._test_string("ab")
+    assert app.ui_manager.test_verdict == "accept"
+    pump(app)
+
+
+def test_rejections_say_why(app):
+    """Four distinct outcomes, four distinct explanations."""
+    app._test_string("ab")
+    assert app.ui_manager.test_verdict == "accept"
+
+    app._test_string("aa")
+    assert app.ui_manager.test_verdict == "reject_non_accepting"
+    assert "not an accepting state" in app.ui_manager.test_result
+
+    app._test_string("abz")
+    assert app.ui_manager.test_verdict == "reject_symbol_not_in_alphabet"
+    assert "not in the alphabet" in app.ui_manager.test_result
+
+    app.dfa.remove_transition("q0", "a")
+    app._invalidate_engine()
+    app._test_string("aa")
+    assert app.ui_manager.test_verdict == "reject_no_transition"
+    assert "incomplete" in app.ui_manager.test_result
+
+
+def test_the_empty_string_can_be_tested(app):
+    """The old UI refused it outright."""
+    app._test_string("")
+    assert app.execution_active
+    assert app.execution_path == ["q0"]
+    assert "empty string" in app.ui_manager.test_result
+    pump(app)
+
+
+def test_dead_states_are_derived_from_the_transition_function(app):
+    """The app no longer trusts the user-set dead-end flag for simulation.
+
+    q2 in the demo is a genuine trap, so it is reported as dead. Give it a way
+    out and it stops being one, with no flag to update.
+    """
+    app.engine()
+    assert "q2" in app._dead_states
+
+    # Note the legacy argument order is (from, to, symbol); the engine's is
+    # (source, symbol, target). Getting them the wrong way round returns False
+    # silently, which is one more reason the legacy model is going away.
+    assert app.dfa.add_transition("q2", "q1", "b") is True
+    app._invalidate_engine()
+    app.engine()
+    assert app._dead_states == frozenset()
+
+
+def test_app_language_matches_the_transition_function(app):
+    """The case the old model got wrong, driven through the app.
+
+    q1 is flagged DEAD_END but delta leads from it to an accepting state.
+    """
+    app.dfa = type(app.dfa)()
+    q0 = app.dfa.add_state((0, 0))
+    q1 = app.dfa.add_state((100, 0))
+    q2 = app.dfa.add_state((200, 0))
+    app.dfa.set_state_type(q1, StateType.DEAD_END)
+    app.dfa.set_state_type(q2, StateType.ACCEPT)
+    app.dfa.add_transition(q0, q1, "a")
+    app.dfa.add_transition(q1, q2, "a")
+    app._invalidate_engine()
+
+    app._test_string("aa")
+    assert app.ui_manager.test_verdict == "accept"
+    assert app.execution_path == ["q0", "q1", "q2"]

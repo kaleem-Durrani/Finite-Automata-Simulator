@@ -11,16 +11,39 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pygame
 
-# Import our modules
-from core.dfa import DFA
-from core.state import StateType
-from rendering.renderer import Renderer
-from ui.ui_manager import UIManager
-
 # Saved automata resolve against the project directory rather than the process
 # working directory, so a file written in one session is findable in the next
 # no matter where python was launched from.
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# The engine lives under src/ so that it can be packaged and installed on its
+# own. Running `python main.py` from a checkout has no install step, so put it
+# on the path here rather than making the documented way to start the app
+# depend on `pip install -e .` first.
+_SRC = os.path.join(PROJECT_DIR, "src")
+if os.path.isdir(_SRC) and _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+# ruff: noqa: E402
+# Everything below imports after the path bootstrap above, deliberately.
+import fsa
+from core.dfa import DFA
+from core.state import StateType
+from rendering import geometry
+from rendering.animation import Animated, AnimatedPoint, Track, ease_in_out, ease_out_back
+from rendering.fonts import FontBook
+from rendering.renderer import Renderer, default_state_radius, loop_angle_for
+from rendering.scene import (
+    EdgeVisual,
+    GhostEdge,
+    NodeKind,
+    NodeVisual,
+    Scene,
+    StartMarker,
+    TokenVisual,
+)
+from rendering.theme import Theme
+from ui.ui_manager import UIManager
 
 
 class AutomatonSimulator:
@@ -50,10 +73,13 @@ class AutomatonSimulator:
         )
         pygame.display.set_caption("Finite Automata Simulator")
         
-        # Initialize components
+        # Initialize components. Theme and fonts are shared, so switching
+        # palettes reaches every surface at once.
+        self.theme = Theme("dark")
+        self.fonts = FontBook()
         self.dfa = DFA()
-        self.renderer = Renderer(self.screen)
-        self.ui_manager = UIManager(self.screen)
+        self.renderer = Renderer(self.screen, self.theme, self.fonts)
+        self.ui_manager = UIManager(self.screen, self.theme, self.fonts)
         
         # Application state
         self.running = True
@@ -68,17 +94,43 @@ class AutomatonSimulator:
         self.transition_start_state: Optional[str] = None
         self.transition_arc_offset = 0.0  # For curved arrows
         
-        # Execution visualization
+        # Execution visualization. The run comes from the engine, so a
+        # rejection carries a reason and each step names the edge it took --
+        # which is what the travelling token animates along.
         self.execution_active = False
         self.execution_step = 0
         self.execution_string = ""
         self.execution_path: List[str] = []
+        self.run_result: Optional[fsa.Run] = None
 
         # Animation system. The step interval lives on the UI manager, next to
         # the slider that sets it -- there is one owner, not two.
         self.animation_active = False
         self.animation_timer = 0
         self.animation_auto_advance = False
+
+        # Animated view state. Each of these closes the gap to its target over
+        # time; nothing in the interface snaps.
+        self.node_active = Track(self.theme.motion.quick)
+        self.node_selected = Track(self.theme.motion.instant)
+        self.node_hover = Track(self.theme.motion.instant)
+        self.node_settle = Track(self.theme.motion.normal)
+        self.edge_active = Track(self.theme.motion.quick)
+        self.token_travel = Animated(duration=self.theme.motion.step)
+        self.traversing_step: Optional[int] = None
+
+        # Camera easing, so zoom, reset and fit glide instead of jumping.
+        self.cam_zoom = Animated(value=1.0, target=1.0,
+                                 duration=self.theme.motion.normal,
+                                 easing=ease_in_out)
+        self.cam_offset = AnimatedPoint()
+        self.cam_offset.jump_to((0.0, 0.0))
+
+        # The engine view of the automaton, rebuilt only when the structure
+        # changes. Dragging a state does not invalidate it.
+        self._engine: Optional[fsa.DFA] = None
+        self._dead_states: frozenset = frozenset()
+        self._unreachable_states: frozenset = frozenset()
 
         # Message system for on-screen feedback
         self.message_text = ""
@@ -222,6 +274,7 @@ class AutomatonSimulator:
         if not self.creating_transition:
             zoom_factor = 1.1 if event.y > 0 else 0.9
             self.renderer.camera.zoom_at(pygame.mouse.get_pos(), zoom_factor)
+            self._sync_camera_targets()
         else:
             # Adjust transition arc when creating transition
             self.transition_arc_offset += event.y * 10
@@ -298,6 +351,8 @@ class AutomatonSimulator:
                 self._handle_confirmed(value)
             elif action == 'confirm_cancel':
                 self._show_message("Cancelled")
+            elif action == 'toggle_theme':
+                self._toggle_theme()
             elif action == 'symbol_added':
                 self._show_message(f"Added symbol: {value}")
             elif action == 'symbol_add_error':
@@ -391,6 +446,9 @@ class AutomatonSimulator:
             dy = pos[1] - self.pan_start[1]
             self.renderer.camera.pan(dx, dy)
             self.pan_start = pos
+            # Direct manipulation wins: adopt the new position as the target so
+            # the easing does not pull the view back where it was heading.
+            self._sync_camera_targets()
 
     def _update_dragging(self, pos: Tuple[int, int]):
         """Update state dragging."""
@@ -486,7 +544,7 @@ class AutomatonSimulator:
         """Remove a state and clear every reference to it."""
         if self.dfa.remove_state(state_id):
             self._forget_state(state_id)
-            self._mark_dirty()
+            self._structural_change()
             self._show_message(f"Deleted state {state_id}")
 
     def _add_state_at_center(self):
@@ -494,7 +552,7 @@ class AutomatonSimulator:
         center_screen = (self.screen.get_width() // 2, self.screen.get_height() // 2)
         center_world = self.renderer.camera.screen_to_world(center_screen)
         state_id = self.dfa.add_state(center_world)
-        self._mark_dirty()
+        self._structural_change()
         self._show_message(f"Added state {state_id}")
 
     def _delete_selected_state(self):
@@ -510,7 +568,7 @@ class AutomatonSimulator:
                 self.dfa.set_state_type(self.selected_state, StateType.NORMAL)
             else:
                 self.dfa.set_state_type(self.selected_state, StateType.ACCEPT)
-            self._mark_dirty()
+            self._structural_change()
 
     def _toggle_dead_end_state(self):
         """Toggle the selected state between normal and dead end."""
@@ -520,38 +578,120 @@ class AutomatonSimulator:
                 self.dfa.set_state_type(self.selected_state, StateType.NORMAL)
             else:
                 self.dfa.set_state_type(self.selected_state, StateType.DEAD_END)
-            self._mark_dirty()
+            self._structural_change()
+
+    # ------------------------------------------------------------------
+    # The engine
+    # ------------------------------------------------------------------
+
+    def _invalidate_engine(self):
+        """Mark the engine view stale after a structural change.
+
+        Separate from the dirty flag: dragging a state changes the document but
+        not the automaton, and rebuilding on every mouse-motion event would be
+        wasteful.
+        """
+        self._engine = None
+
+    def engine(self) -> fsa.DFA:
+        """The automaton as the engine sees it.
+
+        The editor still owns a mutable model; this is the bridge. Simulation
+        and analysis go through here, so the app computes the language the
+        transition function actually describes rather than the one the old
+        dead-end flag implied.
+        """
+        if self._engine is None:
+            automaton = fsa.DFA(alphabet=frozenset(self.dfa.alphabet))
+            automaton = automaton.with_states(list(self.dfa.states))
+            for source, symbol_map in self.dfa.transitions.items():
+                for symbol, target in symbol_map.items():
+                    automaton = automaton.with_transition(source, symbol, target)
+            for state_id in self.dfa.accept_states:
+                automaton = automaton.with_accept(state_id)
+            initial = self.dfa.initial_state
+            automaton = automaton.with_initial(
+                initial if initial in self.dfa.states else None)
+
+            self._engine = automaton
+            self._dead_states = fsa.dead_states(automaton)
+            self._unreachable_states = fsa.unreachable_states(automaton)
+        return self._engine
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
 
     def _test_string(self, test_string: str):
-        """Test a string against the automaton."""
-        if not test_string:
-            self.ui_manager.test_result = "Enter a string to test"
+        """Run a string through the automaton and start the visualisation.
+
+        The empty string is a legal, and pedagogically important, input. The
+        old version refused it.
+        """
+        result = fsa.run(self.engine(), test_string)
+        self.run_result = result
+
+        self.ui_manager.test_result = result.explain()
+        self.ui_manager.test_verdict = result.verdict.value
+
+        self.execution_active = True
+        self.execution_string = test_string
+        self.execution_path = list(result.path)
+        self.execution_step = 0
+        self.traversing_step = None
+        self.token_travel.jump_to(0.0)
+
+        if self.execution_path:
+            self.node_settle.set(self.execution_path[0], 1.0,
+                                 duration=self.theme.motion.quick,
+                                 easing=ease_out_back)
+            self.node_settle.set(self.execution_path[0], 0.0,
+                                 duration=self.theme.motion.normal)
+
+    def _goto_execution_step(self, index: int, animate: bool = True):
+        """Move the visualisation to a position in the run.
+
+        Animates the token along the edge that connects the two positions, in
+        whichever direction it is travelling, so stepping backwards reads as
+        the machine reversing rather than teleporting.
+        """
+        if not self.execution_active or not self.execution_path:
             return
 
-        accepted, path = self.dfa.process_string(test_string)
+        index = max(0, min(len(self.execution_path) - 1, index))
+        if index == self.execution_step:
+            return
 
-        if accepted:
-            self.ui_manager.test_result = f"String '{test_string}' ACCEPTED"
+        forward = index > self.execution_step
+        step_index = self.execution_step if forward else index
+
+        self.execution_step = index
+
+        steps = self.run_result.steps if self.run_result else ()
+        if animate and 0 <= step_index < len(steps):
+            self.traversing_step = step_index
+            self.token_travel.jump_to(0.0 if forward else 1.0)
+            self.token_travel.set(1.0 if forward else 0.0,
+                                  duration=self.theme.motion.step)
+            step = steps[step_index]
+            self.edge_active.set(f"{step.source}|{step.target}", 1.0,
+                                 duration=self.theme.motion.instant)
         else:
-            self.ui_manager.test_result = f"String '{test_string}' REJECTED"
+            self.traversing_step = None
 
-        # Start execution visualization
-        self.execution_active = True
-        self.execution_step = 0
-        self.execution_string = test_string
-        self.execution_path = path
+        state_id = self.execution_path[index]
+        self.node_settle.set(state_id, 1.0, duration=self.theme.motion.quick,
+                             easing=ease_out_back)
 
     def _next_execution_step(self):
-        """Move to the next step in execution visualization."""
+        """Advance one transition."""
         if self.execution_active and self.execution_step < len(self.execution_path) - 1:
-            self.execution_step += 1
-            self._show_message(f"Step {self.execution_step + 1}/{len(self.execution_path)}")
+            self._goto_execution_step(self.execution_step + 1)
 
     def _previous_execution_step(self):
-        """Move to the previous step in execution visualization."""
+        """Go back one transition."""
         if self.execution_active and self.execution_step > 0:
-            self.execution_step -= 1
-            self._show_message(f"Step {self.execution_step + 1}/{len(self.execution_path)}")
+            self._goto_execution_step(self.execution_step - 1)
 
     def _stop_execution(self):
         """Stop execution visualization."""
@@ -559,8 +699,13 @@ class AutomatonSimulator:
         self.execution_step = 0
         self.execution_string = ""
         self.execution_path = []
+        self.run_result = None
+        self.traversing_step = None
         self.animation_active = False
         self.animation_auto_advance = False
+        self.node_active.clear()
+        self.edge_active.clear()
+        self.token_travel.jump_to(0.0)
 
     def _toggle_animation(self):
         """Toggle animation mode for execution."""
@@ -638,16 +783,30 @@ class AutomatonSimulator:
         self.ui_manager.test_result = ""
         self.ui_manager.sync_symbols_with(self.dfa)
 
+        self._invalidate_engine()
+        self.node_selected.clear()
+        self.node_hover.clear()
+        self.node_settle.clear()
+
         self.current_filename = os.path.relpath(path, PROJECT_DIR)
         self.dirty = False
         self._update_caption()
         self._show_message(f"Loaded {self.current_filename}")
 
     def _mark_dirty(self):
-        """Record that the automaton has unsaved changes."""
+        """Record that the document has unsaved changes."""
         if not self.dirty:
             self.dirty = True
             self._update_caption()
+
+    def _structural_change(self):
+        """Record an edit that changes the automaton, not just its layout.
+
+        Moving a state is a document change but not a structural one, so
+        dragging does not force the engine to be rebuilt on every motion event.
+        """
+        self._mark_dirty()
+        self._invalidate_engine()
 
     def _update_caption(self):
         """Reflect the current file and unsaved state in the window title."""
@@ -701,17 +860,17 @@ class AutomatonSimulator:
 
         if verb == "set_accept":
             self.dfa.set_state_type(payload, StateType.ACCEPT)
-            self._mark_dirty()
+            self._structural_change()
         elif verb == "set_dead_end":
             self.dfa.set_state_type(payload, StateType.DEAD_END)
-            self._mark_dirty()
+            self._structural_change()
         elif verb == "set_normal":
             self.dfa.set_state_type(payload, StateType.NORMAL)
-            self._mark_dirty()
+            self._structural_change()
         elif verb == "set_initial":
             if payload in self.dfa.states:
                 self.dfa.initial_state = payload
-                self._mark_dirty()
+                self._structural_change()
                 self._show_message(f"{payload} is now the initial state")
         elif verb == "delete_state":
             # Goes through _remove_state so the app's own references to this
@@ -722,32 +881,118 @@ class AutomatonSimulator:
             coords = payload.split(",")
             pos = (float(coords[0]), float(coords[1]))
             state_id = self.dfa.add_state(pos)
-            self._mark_dirty()
+            self._structural_change()
             self._show_message(f"Added state {state_id}")
         elif verb == "reset_view":
-            self.renderer.camera.reset()
+            self._fit_to_content()
+
+    # ------------------------------------------------------------------
+    # Camera
+    # ------------------------------------------------------------------
+
+    def _fit_to_content(self):
+        """Frame the whole automaton, easing rather than snapping.
+
+        `reset()` pinned the world origin to the top-left corner, which could
+        leave the graph entirely off screen -- a "reset view" that lost your
+        work rather than finding it.
+        """
+        scene = self._build_scene()
+        bounds = scene.bounds()
+        if bounds is None:
+            self.cam_zoom.set(1.0, duration=self.theme.motion.slow)
+            self.cam_offset.set((0.0, 0.0), duration=self.theme.motion.slow)
+            self._show_message("View reset")
+            return
+
+        zoom, offset = self.renderer.fit_to_bounds(bounds)
+        self.cam_zoom.set(zoom, duration=self.theme.motion.slow, easing=ease_in_out)
+        self.cam_offset.set(offset, duration=self.theme.motion.slow, easing=ease_in_out)
+        self._show_message("Fitted to content")
+
+    def _sync_camera_targets(self):
+        """Adopt the camera's current values as the animation's targets.
+
+        Direct manipulation -- panning, wheel zoom -- writes straight to the
+        camera. Without this the easing would drag it back to where the last
+        animated move left it.
+        """
+        self.cam_zoom.jump_to(self.renderer.camera.zoom)
+        self.cam_offset.jump_to((self.renderer.camera.offset_x,
+                                 self.renderer.camera.offset_y))
+
+    def _update_camera(self, dt: float):
+        self.cam_zoom.update(dt)
+        self.cam_offset.update(dt)
+        if not (self.cam_zoom.is_settled and self.cam_offset.is_settled):
+            self.renderer.camera.zoom = self.cam_zoom.value
+            self.renderer.camera.offset_x = self.cam_offset.value[0]
+            self.renderer.camera.offset_y = self.cam_offset.value[1]
+
+    # ------------------------------------------------------------------
+    # Frame update
+    # ------------------------------------------------------------------
 
     def _update(self, dt: float):
         """Update application state."""
-        # Update UI manager
         self.ui_manager.update(dt)
-
-        # Update message system
         self._update_message()
+        self._update_camera(dt)
+        self._update_animation_targets()
+        self._advance_playback()
 
-        # Handle animation auto-advance. The interval is owned by the UI, which
-        # is where the slider that sets it lives; keeping a second copy here
-        # meant dragging the slider changed a value nothing ever read.
-        if (self.animation_active and self.animation_auto_advance and
-            self.execution_active):
-            current_time = pygame.time.get_ticks()
-            if current_time - self.animation_timer >= self.ui_manager.animation_speed:
-                if self.execution_step < len(self.execution_path) - 1:
-                    self.execution_step += 1
-                    self.animation_timer = current_time
-                else:
-                    # Animation finished
-                    self.animation_auto_advance = False
+        for track in (self.node_active, self.node_selected, self.node_hover,
+                      self.node_settle, self.edge_active):
+            track.update(dt)
+        self.token_travel.update(dt)
+
+    def _update_animation_targets(self):
+        """Point every animated value at where it should be, then let it travel."""
+        live = set(self.dfa.states)
+        for track in (self.node_active, self.node_selected, self.node_hover,
+                      self.node_settle):
+            track.drop_missing(live)
+
+        for state_id, state in self.dfa.states.items():
+            self.node_selected.set(state_id, 1.0 if state.selected else 0.0)
+            self.node_hover.set(state_id, 1.0 if state.hover else 0.0)
+            self.node_settle.set(state_id, 0.0, duration=self.theme.motion.normal)
+
+        current = self._current_execution_state()
+        for state_id in self.dfa.states:
+            self.node_active.set(state_id, 1.0 if state_id == current else 0.0)
+
+        # Traversal highlight fades once the token has arrived.
+        if self.token_travel.is_settled:
+            for key in list(self.dfa.transition_groups):
+                self.edge_active.set(f"{key[0]}|{key[1]}", 0.0,
+                                     duration=self.theme.motion.normal)
+
+    def _current_execution_state(self) -> Optional[str]:
+        if not self.execution_active or not self.execution_path:
+            return None
+        index = min(self.execution_step, len(self.execution_path) - 1)
+        return self.execution_path[index]
+
+    def _advance_playback(self):
+        """Step the run forward on a timer while playback is running."""
+        if not (self.animation_active and self.animation_auto_advance
+                and self.execution_active):
+            return
+
+        now = pygame.time.get_ticks()
+        interval = max(self.ui_manager.animation_speed,
+                       self.theme.motion.step + 60)
+        if now - self.animation_timer < interval:
+            return
+
+        if self.execution_step < len(self.execution_path) - 1:
+            self._goto_execution_step(self.execution_step + 1)
+            self.animation_timer = now
+        else:
+            self.animation_auto_advance = False
+            self.animation_active = False
+            self._show_message("Playback finished")
 
     def _start_transition(self, from_state: str):
         """Start creating a transition from the given state."""
@@ -764,7 +1009,7 @@ class AutomatonSimulator:
             added = self.dfa.add_transition(
                 from_state, to_state, symbol, self.transition_arc_offset)
             if added:
-                self._mark_dirty()
+                self._structural_change()
                 self._show_message(f"Added transition: {from_state} --{symbol}--> {to_state}")
             else:
                 # add_transition only reports failure by returning False; without
@@ -778,110 +1023,177 @@ class AutomatonSimulator:
         self.transition_start_state = None
         self.transition_arc_offset = 0.0
 
-    def _render(self):
-        """Render the entire application."""
-        # Clear screen
-        self.renderer.clear()
+    # ------------------------------------------------------------------
+    # Building the scene
+    # ------------------------------------------------------------------
 
-        # Draw initial state arrow
-        if self.dfa.initial_state and self.dfa.initial_state in self.dfa.states:
-            initial_state = self.dfa.states[self.dfa.initial_state]
-            self.renderer.draw_initial_state_arrow(initial_state.position)
+    def _symbol_index(self, symbol: str) -> int:
+        """Position of a symbol in the sorted alphabet, for edge colouring.
 
-        # Draw transitions using transition groups
-        for (from_state_id, to_state_id), group_data in self.dfa.transition_groups.items():
-            if from_state_id not in self.dfa.states or to_state_id not in self.dfa.states:
+        Keyed on position rather than on the literal characters 'a' and 'b',
+        which rendered the shipped {0,1} example entirely in one colour.
+        """
+        alphabet = sorted(self.dfa.alphabet)
+        try:
+            return alphabet.index(symbol)
+        except ValueError:
+            return len(alphabet)
+
+    def _edge_paths(self) -> Dict[Tuple[str, str], List[Tuple[float, float]]]:
+        """The drawn path of every transition group, in world coordinates."""
+        radius = default_state_radius()
+        paths: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+        loop_counter = 0
+
+        for key, group in self.dfa.transition_groups.items():
+            source_id, target_id = key
+            source = self.dfa.states.get(source_id)
+            target = self.dfa.states.get(target_id)
+            if source is None or target is None:
                 continue
 
-            from_state = self.dfa.states[from_state_id]
-            to_state = self.dfa.states[to_state_id]
+            if source_id == target_id:
+                paths[key] = geometry.self_loop_path(
+                    tuple(source.position), radius,
+                    angle=loop_angle_for(loop_counter))
+                loop_counter += 1
+                continue
 
-            symbols = sorted(list(group_data['symbols']))
-            arc_offset = group_data['arc_offset']
+            arc = float(group.get('arc_offset', 0.0))
+            if abs(arc) < 0.01:
+                arc = geometry.auto_arc(
+                    source_id, target_id,
+                    (target_id, source_id) in self.dfa.transition_groups)
 
-            # Choose color based on first symbol (for consistency)
-            first_symbol = symbols[0] if symbols else 'a'
-            if first_symbol == 'a':
-                color = self.renderer.colors['transition_a']
-            elif first_symbol == 'b':
-                color = self.renderer.colors['transition_b']
+            paths[key] = geometry.edge_path(
+                tuple(source.position), tuple(target.position),
+                radius, radius, arc)
+
+        return paths
+
+    def _build_scene(self) -> Scene:
+        """Describe this frame as geometry, with no reference to pixels.
+
+        Everything the renderer needs is produced here. When the editor moves
+        onto the engine's immutable document, only this method changes.
+        """
+        self.engine()  # refreshes the derived dead/unreachable sets
+        radius = default_state_radius()
+        scene = Scene()
+
+        edge_paths = self._edge_paths()
+        for key, path in edge_paths.items():
+            group = self.dfa.transition_groups[key]
+            symbols = sorted(group['symbols'])
+            scene.edges.append(EdgeVisual(
+                key=key,
+                path=path,
+                label=", ".join(symbols),
+                color_index=self._symbol_index(symbols[0]) if symbols else 0,
+                active=self.edge_active.get(f"{key[0]}|{key[1]}"),
+            ))
+
+        for state_id, state in self.dfa.states.items():
+            if state_id in self._dead_states:
+                kind = NodeKind.DEAD
+            elif state_id in self._unreachable_states:
+                kind = NodeKind.UNREACHABLE
             else:
-                color = self.renderer.colors['transition_other']
+                kind = NodeKind.NORMAL
 
-            # Check if this is a self-loop
-            is_self_loop = from_state_id == to_state_id
+            scene.nodes.append(NodeVisual(
+                id=state_id,
+                position=tuple(state.position),
+                radius=radius,
+                label=state_id,
+                kind=kind,
+                is_accept=state_id in self.dfa.accept_states,
+                selected=self.node_selected.get(state_id),
+                hover=self.node_hover.get(state_id),
+                active=self.node_active.get(state_id),
+                settle=self.node_settle.get(state_id),
+            ))
 
-            # If no arc offset set, calculate default for bidirectional arrows
-            if arc_offset == 0.0 and not is_self_loop:
-                reverse_key = (to_state_id, from_state_id)
-                if reverse_key in self.dfa.transition_groups:
-                    # Create curved arrows - one curves up, one curves down
-                    if from_state_id < to_state_id:  # Lexicographic order
-                        arc_offset = 30.0  # This arrow curves up
-                    else:
-                        arc_offset = -30.0  # This arrow curves down
+        initial = self.dfa.initial_state
+        if initial and initial in self.dfa.states:
+            scene.start_marker = StartMarker(geometry.start_marker_path(
+                tuple(self.dfa.states[initial].position), radius))
 
-            # Combine symbols for label
-            label = ','.join(symbols)
-
-            self.renderer.draw_arrow(
-                from_state.position,
-                to_state.position,
-                color,
-                label,
-                is_self_loop,
-                arc_offset
-            )
-
-        # Draw transition being created
         if self.creating_transition and self.transition_start_state:
-            start_state = self.dfa.states.get(self.transition_start_state)
-            if start_state is None:
-                # The source state was deleted mid-gesture. An unguarded lookup
-                # here raised KeyError every frame, which killed the process.
+            source = self.dfa.states.get(self.transition_start_state)
+            if source is None:
+                # The source was deleted mid-gesture. An unguarded lookup here
+                # used to raise KeyError every frame and kill the process.
                 self._cancel_transition()
             else:
-                mouse_pos = pygame.mouse.get_pos()
-                world_mouse = self.renderer.camera.screen_to_world(mouse_pos)
-                self.renderer.draw_arrow(
-                    start_state.position,
-                    world_mouse,
-                    self.renderer.colors['transition_creating'],
-                    self.ui_manager.selected_symbol,
-                    False,
-                    self.transition_arc_offset
+                world_mouse = self.renderer.camera.screen_to_world(
+                    pygame.mouse.get_pos())
+                scene.ghost_edge = GhostEdge(
+                    path=geometry.edge_path(tuple(source.position), world_mouse,
+                                            radius, 0.0,
+                                            self.transition_arc_offset),
+                    label=self.ui_manager.selected_symbol,
                 )
 
-        # Draw states with execution highlighting
-        for state_id, state in self.dfa.states.items():
-            # Check if this state is currently being executed
-            is_executing = (self.execution_active and
-                          self.execution_step < len(self.execution_path) and
-                          self.execution_path[self.execution_step] == state_id)
+        scene.token = self._build_token(edge_paths)
+        return scene
 
-            self.renderer.draw_state(state, is_executing)
+    def _build_token(self, edge_paths) -> Optional[TokenVisual]:
+        """The read head, positioned along the edge it is currently crossing.
 
-        # Draw UI
-        self.ui_manager.draw(self.dfa, self.ui_manager.test_result, self.animation_active)
+        This is what replaces a text label teleporting between states: the
+        marker moves continuously along the real drawn path, at a constant
+        speed in screen distance rather than in curve parameter.
+        """
+        if not self.execution_active or not self.run_result:
+            return None
 
-        # Draw execution status
+        steps = self.run_result.steps
+        travel = self.token_travel.value
+
+        if self.traversing_step is not None and self.traversing_step < len(steps):
+            step = steps[self.traversing_step]
+            path = edge_paths.get((step.source, step.target))
+            if path:
+                trail_start = max(0.0, travel - 0.22)
+                trail = [geometry.point_at(path, trail_start + (travel - trail_start) * i / 6)
+                         for i in range(7)]
+                return TokenVisual(
+                    position=geometry.point_at(path, travel),
+                    radius=7.0,
+                    trail=trail,
+                    intensity=1.0,
+                )
+
+        # At rest there is no token. The active state's glow already says where
+        # the machine is, and a marker parked on the node covers its label.
+        return None
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _render(self):
+        """Compose one frame.
+
+        Deliberately short: it clears, hands a scene to the renderer, and lets
+        the UI draw itself. Every colour and geometry decision lives elsewhere.
+        """
+        self.renderer.clear()
+        self.renderer.draw_scene(self._build_scene())
+
+        self.ui_manager.draw(self.dfa, self.ui_manager.test_result,
+                             self.animation_active)
         self.ui_manager.draw_execution_status(
             self.execution_active,
             self.execution_step,
             self.execution_string,
-            self.execution_path
+            self.execution_path,
+            self.run_result,
         )
         if self.execution_active:
-
-            # Draw string visualization
-            self.ui_manager.draw_string_visualization(self.execution_string, self.execution_step)
-
-            # Draw current state indicator
-            if self.execution_step < len(self.execution_path):
-                current_state_id = self.execution_path[self.execution_step]
-                if current_state_id in self.dfa.states:
-                    current_state = self.dfa.states[current_state_id]
-                    self.renderer.draw_current_state_indicator(current_state.position)
+            self.ui_manager.draw_string_visualization(
+                self.execution_string, self.execution_step, self.run_result)
 
         # Draw temporary message
         if self.message_text:
@@ -890,25 +1202,40 @@ class AutomatonSimulator:
         pygame.display.flip()
 
     def _draw_message(self):
-        """Draw temporary message on screen."""
-        font = pygame.font.Font(None, 24)  # Smaller font
-        text_surface = font.render(self.message_text, True, (255, 255, 255))
+        """Draw the transient toast, bottom right.
 
-        # Create background - position at bottom right
-        padding = 10
-        bg_width = text_surface.get_width() + padding * 2
-        bg_height = text_surface.get_height() + padding * 2
-        bg_x = self.screen.get_width() - bg_width - 20
-        bg_y = self.screen.get_height() - bg_height - 20
+        Fades out over its last third rather than vanishing, and uses the
+        cached font instead of constructing a new one every frame.
+        """
+        palette = self.theme.palette
+        elapsed = pygame.time.get_ticks() - self.message_timer
+        remaining = max(0, self.message_duration - elapsed)
+        fade = min(1.0, remaining / (self.message_duration * 0.34))
 
-        # Draw background
-        bg_rect = pygame.Rect(bg_x, bg_y, bg_width, bg_height)
-        pygame.draw.rect(self.screen, (0, 0, 0, 180), bg_rect)
-        pygame.draw.rect(self.screen, (255, 255, 255), bg_rect, 2)
+        font = self.fonts.ui("body")
+        text_surface = font.render(self.message_text, True, palette.text)
 
-        # Draw text
-        text_rect = text_surface.get_rect(center=bg_rect.center)
-        self.screen.blit(text_surface, text_rect)
+        pad_x, pad_y = self.theme.space.md, self.theme.space.sm
+        rect = pygame.Rect(0, 0,
+                           text_surface.get_width() + pad_x * 2,
+                           text_surface.get_height() + pad_y * 2)
+        rect.bottomright = (self.screen.get_width() - self.theme.space.lg,
+                            self.screen.get_height() - self.theme.space.lg)
+
+        from rendering import primitives
+        primitives.translucent_panel(
+            self.screen, rect,
+            (*palette.panel_raised, int(238 * fade)),
+            radius=self.theme.radius.md,
+            border=(*palette.border, int(255 * fade)))
+
+        text_surface.set_alpha(int(255 * fade))
+        self.screen.blit(text_surface, text_surface.get_rect(center=rect.center))
+
+    def _toggle_theme(self):
+        """Switch between the dark and light palettes."""
+        name = self.theme.toggle()
+        self._show_message(f"{name.capitalize()} theme")
 
 
 if __name__ == "__main__":

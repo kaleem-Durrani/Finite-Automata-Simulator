@@ -9,13 +9,19 @@ then step through how a string is processed, one symbol at a time.
 ## Features
 
 - **Visual DFA design** — create and edit deterministic finite automata on an infinite canvas
+- **Explained results** — a rejection says *why*: no transition defined, a symbol outside the
+  alphabet, or the run halting in a non-accepting state
+- **Animated execution** — a token travels along the edge it is taking, the state it enters lights
+  up, and the input tape advances under a moving read head
+- **Step-by-step, in both directions** — walk forwards and backwards through the run, or play it
+  back at an adjustable speed
+- **Derived trap states** — states from which no accepting state can be reached are computed from
+  the transition function and dimmed automatically
+- **Dark and light themes** — toggle from the toolbar
+- **Pan and zoom** — with eased camera movement and fit-to-content
+- **Transition rendering** — anti-aliased curves, self-loops, bidirectional pairs separated
+  automatically, and labels on plates so they stay legible where edges cross
 - **Configurable symbol palette** — `a`, `b`, `0`, `1` by default; more can be added at runtime
-- **String testing** — test a string against the automaton and see the result
-- **Step-by-step execution** — walk forwards and backwards through the run, or play it back
-  automatically at an adjustable speed
-- **Pan and zoom** — navigate larger automata
-- **State types** — normal, accepting, and trap ("dead end") states, each visually distinct
-- **Transition rendering** — curved arrows with labels, self-loops, and grouped multi-symbol edges
 - **Context menus** — right-click a state to change its type or delete it
 - **JSON file format** — human-readable and hand-editable
 
@@ -51,7 +57,7 @@ python main.py
 | `Delete` | Remove the selected state |
 | `Q` | Toggle the selected state as accepting |
 | `W` | Toggle the selected state as a trap state |
-| `R` | Reset the camera |
+| `R` | Fit the view to the automaton |
 | `N` / `P` | Next / previous step during execution |
 | `Tab` | Toggle automatic playback during execution |
 | `Esc` | Stop the execution trace, or close a dialog |
@@ -110,13 +116,25 @@ Automata are stored as JSON:
 ## Project layout
 
 ```
-main.py                 application class, event loop, frame composition
-core/state.py           State object: position, type, hit-testing
-core/dfa.py             the automaton: states, transitions, alphabet, simulation, JSON I/O
-core/camera.py          viewport pan/zoom, world <-> screen conversion
-rendering/renderer.py   drawing states, arrows, labels, self-loops
-ui/ui_manager.py        toolbar, input field, symbol palette, context menus, help, overlays
-examples/               sample automata
+main.py                    application class, event loop, scene building
+src/fsa/                   the automata engine -- no pygame, no dependencies
+  automaton.py               immutable DFA; flat transition function
+  simulate.py                Run, Verdict, and explain()
+  analysis.py                reachability, dead states, defects
+core/                      legacy editor model, being retired
+rendering/
+  theme.py                   design tokens: two palettes, one set of names
+  fonts.py                   system font selection and caching
+  geometry.py                path maths -- edges, self-loops, arrowheads
+  primitives.py              anti-aliased drawing over gfxdraw
+  animation.py               easing curves and interpolated values
+  scene.py                   what to draw, described without pixels
+  renderer.py                paints a scene
+ui/
+  layout_spec.py             every UI rectangle, computed once from the window size
+  ui_manager.py              panels, dialogs, palette, help
+tests/                     conformance spec, engine, geometry, app regressions
+examples/                  sample automata
 ```
 
 ## Saving and loading
@@ -132,19 +150,9 @@ loading with unsaved changes asks for confirmation first.
 
 These are known and tracked. Listing them here rather than letting you discover them the hard way:
 
-- **Marking a state as a trap state changes how strings are evaluated** rather than the trap being
-  derived from the transition function. If a "dead end" state has an outgoing path to an accepting
-  state, the simulator rejects anyway — so the verdict can disagree with the diagram. This is the
-  most significant known defect; it is pinned by four failing cases in the conformance suite.
-- **A rejected string does not say why it was rejected.** No transition defined, symbol outside
-  the alphabet, and halting in a non-accepting state all report the same bare "REJECTED".
-- **The empty string cannot be tested** from the input field.
-- **Shift+click drags the state** as well as starting a transition, because the click is handled
-  twice. The transition still gets made; the state also moves.
-- **Right-click does nothing near the top and bottom of the window** — those bands are reserved
-  for the toolbar and input area regardless of what is actually drawn there.
-- **The help panel does not scroll**, so its last few lines are unreachable.
-- **The animation speed slider cannot be dragged.**
+- **The editor still uses a separate legacy model.** Simulation and analysis go through the
+  engine, so verdicts and trap states are correct, but editing operations do not yet. Deleting the
+  start state, for instance, still promotes another state rather than leaving none.
 - **Transitions cannot be deleted or edited individually.** Drawing a new transition on the same
   symbol replaces the old one; otherwise the only way to remove one is to delete a state.
 - **There is no undo.**
@@ -163,21 +171,25 @@ mypy              # type check
 pytest            # tests, headless
 ```
 
+`src/fsa/` is the automata engine: immutable, dependency-free, and importable without a display.
+`rendering/` is the view layer — `theme.py` holds every colour and spacing token, `geometry.py` is
+pure path maths shared with the future SVG exporter, and `scene.py` is the boundary that keeps the
+renderer ignorant of automata.
+
 The test suite includes `tests/conformance/cases.json`: a specification of DFA semantics where
 every expected verdict and run was computed by hand from the transition function rather than
 recorded from the implementation. Cases the simulator currently gets wrong are marked and run as
 strict expected-failures, so fixing one turns it green and CI notices if a defect disappears
 without the marker being removed.
 
-`core/` must not import pygame — the automaton model has to stay usable without a display. CI
-enforces this.
+Neither `src/fsa/` nor `core/` may import pygame — the automaton has to stay usable without a
+display. CI enforces this by parsing the import statements.
 
 ## Roadmap
 
-In rough order: give every input event a single owner (fixing shift+click, right-click coverage,
-and help scrolling); extract a tested, Pygame-free automata engine and derive trap states from the
-transition function instead of a flag; add a CLI and DOT/TikZ/SVG export; explain *why* a string
-was rejected; undo; then minimisation, equivalence checking with counterexamples, and NFA support.
+In rough order: move the editor itself onto the engine and retire `core/`; add a CLI and
+DOT/TikZ/SVG export; undo; edit and delete individual transitions; then minimisation, equivalence
+checking with counterexamples, and NFA support.
 
 ## License
 
