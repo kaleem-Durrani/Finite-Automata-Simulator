@@ -5,6 +5,7 @@ This is the entry point that coordinates all components and handles
 the main game loop, event processing, and application state.
 """
 
+import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +17,11 @@ from core.state import StateType
 from rendering.renderer import Renderer
 from ui.ui_manager import UIManager
 
+# Saved automata resolve against the project directory rather than the process
+# working directory, so a file written in one session is findable in the next
+# no matter where python was launched from.
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 class AutomatonSimulator:
     """
@@ -25,6 +31,8 @@ class AutomatonSimulator:
     coordinates between the DFA, UI, rendering, and camera systems.
     """
     
+    DEFAULT_FILENAME = "automaton.json"
+
     def __init__(self):
         """Initialize the automaton simulator."""
         # Initialize Pygame
@@ -80,9 +88,14 @@ class AutomatonSimulator:
         # Camera controls
         self.panning = False
         self.pan_start = (0, 0)
-        
+
+        # File state
+        self.current_filename: Optional[str] = None
+        self.dirty = False
+
         # Create initial demo automaton
         self._create_demo_automaton()
+        self._update_caption()
         
     def _create_demo_automaton(self):
         """Create a simple demo automaton for testing."""
@@ -124,7 +137,7 @@ class AutomatonSimulator:
         """Process all pygame events."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                self.running = False
+                self._request_quit()
 
             elif event.type == pygame.VIDEORESIZE:
                 self._handle_resize(event.w, event.h)
@@ -159,6 +172,10 @@ class AutomatonSimulator:
 
     def _handle_mouse_down(self, event):
         """Handle mouse button down events."""
+        # A modal dialog owns the screen; clicks must not reach the canvas.
+        if self.ui_manager.is_modal_active():
+            return
+
         if event.button == 1:  # Left click
             self._handle_left_click(event.pos)
         elif event.button == 2:  # Middle click
@@ -211,8 +228,10 @@ class AutomatonSimulator:
 
     def _handle_key_down(self, event):
         """Handle key down events."""
-        # Don't process if UI input is active
-        if self.ui_manager.input_active:
+        # Editor shortcuts are bare letters, so they must not fire while a text
+        # field or a dialog has the keyboard. Without this, typing into the
+        # Add Symbol dialog also edits the automaton behind it.
+        if self.ui_manager.is_keyboard_captured():
             return
 
         # Handle system keys first (these take priority)
@@ -273,8 +292,18 @@ class AutomatonSimulator:
                 self._show_add_symbol_dialog()
             elif action == 'context_menu_action':
                 self._handle_context_menu_action(value)
+            elif action == 'save_to_path':
+                self._save_to_path(value)
+            elif action == 'load_to_path':
+                self._load_from_path(value)
+            elif action == 'file_prompt_cancel':
+                self._show_message("Cancelled")
+            elif action == 'confirmed':
+                self._handle_confirmed(value)
+            elif action == 'confirm_cancel':
+                self._show_message("Cancelled")
             elif action == 'symbol_added':
-                print(f"Added symbol: {value}")
+                self._show_message(f"Added symbol: {value}")
             elif action == 'symbol_add_error':
                 self._show_message(f"Error: {value}")
             elif action == 'symbol_dialog_cancel':
@@ -284,6 +313,14 @@ class AutomatonSimulator:
                     self._show_message(f"Added symbol: {value}")
                 else:
                     self._show_message(f"Error: Cannot add symbol '{value}'")
+
+    def _handle_confirmed(self, intent: str):
+        """Carry out the action a confirmation dialog was guarding."""
+        if intent == 'quit_after_confirm':
+            self.running = False
+        elif intent == 'load_after_confirm':
+            self.ui_manager.show_file_prompt(
+                'load', self.current_filename or self.DEFAULT_FILENAME)
 
     def _show_message(self, text: str):
         """Show a temporary message on screen."""
@@ -373,11 +410,12 @@ class AutomatonSimulator:
 
     def _update_dragging(self, pos: Tuple[int, int]):
         """Update state dragging."""
-        if self.dragging_state:
+        state = self.dfa.states.get(self.dragging_state) if self.dragging_state else None
+        if state is not None:
             world_pos = self.renderer.camera.screen_to_world(pos)
-            state = self.dfa.states[self.dragging_state]
             state.position[0] = world_pos[0] - self.drag_offset[0]
             state.position[1] = world_pos[1] - self.drag_offset[1]
+            self._mark_dirty()
 
     def _update_hover_states(self, pos: Tuple[int, int]):
         """Update hover states for visual feedback."""
@@ -427,39 +465,78 @@ class AutomatonSimulator:
     def _stop_dragging(self):
         """Stop dragging the current state."""
         if self.dragging_state:
-            self.dfa.states[self.dragging_state].being_dragged = False
+            state = self.dfa.states.get(self.dragging_state)
+            if state is not None:
+                state.being_dragged = False
             self.dragging_state = None
             self.drag_offset = (0, 0)
+
+    def _forget_state(self, state_id: str):
+        """
+        Drop every app-level reference to a state that no longer exists.
+
+        The DFA owns the automaton, but the app holds its own pointers into it:
+        the selection, the state being dragged, the source of a half-drawn
+        transition, and the execution trace. If any of those outlive the state
+        they name, the next lookup raises KeyError -- and for the transition
+        pointer that lookup happens in _render, so it fires every frame and
+        kills the process.
+
+        Called from every path that removes a state, so there is one place to
+        keep correct rather than one per caller.
+        """
+        if self.selected_state == state_id:
+            self.selected_state = None
+
+        if self.dragging_state == state_id:
+            self.dragging_state = None
+            self.drag_offset = (0, 0)
+
+        if self.transition_start_state == state_id:
+            self._cancel_transition()
+
+        if state_id in self.execution_path:
+            self._stop_execution()
+
+    def _remove_state(self, state_id: str):
+        """Remove a state and clear every reference to it."""
+        if self.dfa.remove_state(state_id):
+            self._forget_state(state_id)
+            self._mark_dirty()
+            self._show_message(f"Deleted state {state_id}")
 
     def _add_state_at_center(self):
         """Add a new state at the center of the current view."""
         center_screen = (self.screen.get_width() // 2, self.screen.get_height() // 2)
         center_world = self.renderer.camera.screen_to_world(center_screen)
-        self.dfa.add_state(center_world)
+        state_id = self.dfa.add_state(center_world)
+        self._mark_dirty()
+        self._show_message(f"Added state {state_id}")
 
     def _delete_selected_state(self):
         """Delete the currently selected state."""
         if self.selected_state:
-            self.dfa.remove_state(self.selected_state)
-            self.selected_state = None
+            self._remove_state(self.selected_state)
 
     def _toggle_accept_state(self):
         """Toggle the selected state between normal and accept."""
-        if self.selected_state:
-            state = self.dfa.states[self.selected_state]
+        state = self.dfa.states.get(self.selected_state) if self.selected_state else None
+        if state is not None:
             if state.state_type == StateType.ACCEPT:
                 self.dfa.set_state_type(self.selected_state, StateType.NORMAL)
             else:
                 self.dfa.set_state_type(self.selected_state, StateType.ACCEPT)
+            self._mark_dirty()
 
     def _toggle_dead_end_state(self):
         """Toggle the selected state between normal and dead end."""
-        if self.selected_state:
-            state = self.dfa.states[self.selected_state]
+        state = self.dfa.states.get(self.selected_state) if self.selected_state else None
+        if state is not None:
             if state.state_type == StateType.DEAD_END:
                 self.dfa.set_state_type(self.selected_state, StateType.NORMAL)
             else:
                 self.dfa.set_state_type(self.selected_state, StateType.DEAD_END)
+            self._mark_dirty()
 
     def _test_string(self, test_string: str):
         """Test a string against the automaton."""
@@ -513,21 +590,93 @@ class AutomatonSimulator:
                 self.animation_auto_advance = False
                 self._show_message("Animation mode OFF - manual stepping")
 
+    # ------------------------------------------------------------------
+    # File handling
+    # ------------------------------------------------------------------
+
+    def _resolve_path(self, filename: str) -> str:
+        """
+        Resolve a user-supplied filename against the project directory.
+
+        Relative paths used to resolve against the process working directory,
+        which meant a file saved from one launch could be unreachable from the
+        next. Anchoring to the project directory makes save and load agree
+        regardless of where python was started from.
+        """
+        filename = filename.strip()
+        if not filename:
+            filename = self.DEFAULT_FILENAME
+        if not os.path.splitext(filename)[1]:
+            filename += '.json'
+        if os.path.isabs(filename):
+            return filename
+        return os.path.normpath(os.path.join(PROJECT_DIR, filename))
+
     def _save_automaton(self):
-        """Save the current automaton to a file."""
-        filename = f"automaton_{pygame.time.get_ticks()}.json"
-        if self.dfa.save_to_file(filename):
-            print(f"Automaton saved to {filename}")
-        else:
-            print("Failed to save automaton")
+        """Prompt for a filename and save the current automaton."""
+        self.ui_manager.show_file_prompt('save', self.current_filename or self.DEFAULT_FILENAME)
 
     def _load_automaton(self):
-        """Load an automaton from a file."""
-        # For now, try to load the example file
-        if self.dfa.load_from_file("examples/simple_binary.json"):
-            print("Automaton loaded successfully")
+        """Prompt for a filename and load an automaton, guarding unsaved work."""
+        if self.dirty:
+            self.ui_manager.show_confirm(
+                "Discard unsaved changes and load?", 'load_after_confirm')
+            return
+        self.ui_manager.show_file_prompt('load', self.current_filename or self.DEFAULT_FILENAME)
+
+    def _save_to_path(self, filename: str):
+        """Write the automaton to disk and report the outcome on screen."""
+        path = self._resolve_path(filename)
+        ok, error = self.dfa.save_to_file(path)
+        if ok:
+            self.current_filename = os.path.relpath(path, PROJECT_DIR)
+            self.dirty = False
+            self._update_caption()
+            self._show_message(f"Saved to {self.current_filename}")
         else:
-            print("Failed to load automaton")
+            self._show_message(f"Save failed: {error}")
+
+    def _load_from_path(self, filename: str):
+        """Read an automaton from disk and report the outcome on screen."""
+        path = self._resolve_path(filename)
+        ok, error = self.dfa.load_from_file(path)
+        if not ok:
+            self._show_message(f"Load failed: {error}")
+            return
+
+        # The loaded automaton is a different machine; nothing about the
+        # previous one -- selection, drag, half-drawn edge, trace -- survives.
+        self._stop_execution()
+        self._cancel_transition()
+        self._deselect_all()
+        self.dragging_state = None
+        self.drag_offset = (0, 0)
+        self.ui_manager.test_result = ""
+        self.ui_manager.sync_symbols_with(self.dfa)
+
+        self.current_filename = os.path.relpath(path, PROJECT_DIR)
+        self.dirty = False
+        self._update_caption()
+        self._show_message(f"Loaded {self.current_filename}")
+
+    def _mark_dirty(self):
+        """Record that the automaton has unsaved changes."""
+        if not self.dirty:
+            self.dirty = True
+            self._update_caption()
+
+    def _update_caption(self):
+        """Reflect the current file and unsaved state in the window title."""
+        name = self.current_filename or "untitled"
+        marker = "*" if self.dirty else ""
+        pygame.display.set_caption(f"{name}{marker} - Finite Automata Simulator")
+
+    def _request_quit(self):
+        """Quit, guarding unsaved work."""
+        if self.dirty:
+            self.ui_manager.show_confirm("Quit without saving?", 'quit_after_confirm')
+        else:
+            self.running = False
 
     def _show_add_symbol_dialog(self):
         """Show dialog to add a new symbol."""
@@ -562,26 +711,36 @@ class AutomatonSimulator:
 
     def _handle_context_menu_action(self, action: str):
         """Handle context menu actions."""
-        if action.startswith("set_accept:"):
-            state_id = action.split(":")[1]
-            self.dfa.set_state_type(state_id, StateType.ACCEPT)
-        elif action.startswith("set_dead_end:"):
-            state_id = action.split(":")[1]
-            self.dfa.set_state_type(state_id, StateType.DEAD_END)
-        elif action.startswith("set_normal:"):
-            state_id = action.split(":")[1]
-            self.dfa.set_state_type(state_id, StateType.NORMAL)
-        elif action.startswith("set_initial:"):
-            state_id = action.split(":")[1]
-            self.dfa.initial_state = state_id
-        elif action.startswith("delete_state:"):
-            state_id = action.split(":")[1]
-            self.dfa.remove_state(state_id)
-        elif action.startswith("add_state:"):
-            coords = action.split(":")[1].split(",")
+        # split(":", 1) rather than split(":") so that a state id containing a
+        # colon cannot silently truncate the payload.
+        verb, _, payload = action.partition(":")
+
+        if verb == "set_accept":
+            self.dfa.set_state_type(payload, StateType.ACCEPT)
+            self._mark_dirty()
+        elif verb == "set_dead_end":
+            self.dfa.set_state_type(payload, StateType.DEAD_END)
+            self._mark_dirty()
+        elif verb == "set_normal":
+            self.dfa.set_state_type(payload, StateType.NORMAL)
+            self._mark_dirty()
+        elif verb == "set_initial":
+            if payload in self.dfa.states:
+                self.dfa.initial_state = payload
+                self._mark_dirty()
+                self._show_message(f"{payload} is now the initial state")
+        elif verb == "delete_state":
+            # Goes through _remove_state so the app's own references to this
+            # state are cleared too. Calling dfa.remove_state directly here was
+            # what left selected_state/transition_start_state dangling.
+            self._remove_state(payload)
+        elif verb == "add_state":
+            coords = payload.split(",")
             pos = (float(coords[0]), float(coords[1]))
-            self.dfa.add_state(pos)
-        elif action == "reset_view":
+            state_id = self.dfa.add_state(pos)
+            self._mark_dirty()
+            self._show_message(f"Added state {state_id}")
+        elif verb == "reset_view":
             self.renderer.camera.reset()
 
     def _update(self, dt: float):
@@ -605,6 +764,9 @@ class AutomatonSimulator:
                     self.animation_auto_advance = False
 
         # Handle shift+click for transition creation
+        if self.ui_manager.is_modal_active():
+            return
+
         keys = pygame.key.get_pressed()
         mouse_buttons = pygame.mouse.get_pressed()
 
@@ -628,9 +790,17 @@ class AutomatonSimulator:
     def _complete_transition(self, to_state: str):
         """Complete the transition to the given state."""
         if self.creating_transition and self.transition_start_state:
+            from_state = self.transition_start_state
             symbol = self.ui_manager.selected_symbol
-            self.dfa.add_transition(self.transition_start_state, to_state, symbol, self.transition_arc_offset)
-            self._show_message(f"Added transition: {self.transition_start_state} --{symbol}--> {to_state}")
+            added = self.dfa.add_transition(
+                from_state, to_state, symbol, self.transition_arc_offset)
+            if added:
+                self._mark_dirty()
+                self._show_message(f"Added transition: {from_state} --{symbol}--> {to_state}")
+            else:
+                # add_transition only reports failure by returning False; without
+                # this the gesture silently does nothing.
+                self._show_message(f"Could not add transition from {from_state}")
             self._cancel_transition()
 
     def _cancel_transition(self):
@@ -696,18 +866,22 @@ class AutomatonSimulator:
 
         # Draw transition being created
         if self.creating_transition and self.transition_start_state:
-            mouse_pos = pygame.mouse.get_pos()
-            world_mouse = self.renderer.camera.screen_to_world(mouse_pos)
-            start_state = self.dfa.states[self.transition_start_state]
-
-            self.renderer.draw_arrow(
-                start_state.position,
-                world_mouse,
-                self.renderer.colors['transition_creating'],
-                self.ui_manager.selected_symbol,
-                False,
-                self.transition_arc_offset
-            )
+            start_state = self.dfa.states.get(self.transition_start_state)
+            if start_state is None:
+                # The source state was deleted mid-gesture. An unguarded lookup
+                # here raised KeyError every frame, which killed the process.
+                self._cancel_transition()
+            else:
+                mouse_pos = pygame.mouse.get_pos()
+                world_mouse = self.renderer.camera.screen_to_world(mouse_pos)
+                self.renderer.draw_arrow(
+                    start_state.position,
+                    world_mouse,
+                    self.renderer.colors['transition_creating'],
+                    self.ui_manager.selected_symbol,
+                    False,
+                    self.transition_arc_offset
+                )
 
         # Draw states with execution highlighting
         for state_id, state in self.dfa.states.items():

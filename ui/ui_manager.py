@@ -57,6 +57,15 @@ class UIManager:
         # Symbol addition dialog state
         self.adding_symbol = False
         self.new_symbol_input = ""
+
+        # Filename prompt state ('save' | 'load' | None)
+        self.file_prompt_mode: Optional[str] = None
+        self.file_prompt_text = ""
+
+        # Confirmation dialog state; confirm_intent names the action being
+        # guarded so the app layer decides what "yes" means.
+        self.confirm_message = ""
+        self.confirm_intent: Optional[str] = None
         
         # UI element rectangles
         self._setup_ui_elements()
@@ -167,12 +176,20 @@ class UIManager:
         """Handle mouse button down events."""
         actions: Dict[str, Any] = {}
 
+        # A modal dialog swallows clicks; the widgets behind it are not live.
+        if self.is_modal_active():
+            return actions
+
         # Only handle left clicks in UI
         if event.button != 1:
             return actions
 
-        mouse_pos = pygame.mouse.get_pos()
-        
+        # Hit-test against where the click happened, not where the cursor is
+        # now. Those differ whenever the mouse moves between the event being
+        # queued and the queue being drained, which loses clicks and lets a
+        # click register against whatever the cursor has since moved over.
+        mouse_pos = event.pos
+
         # Check input field
         if self.input_rect.collidepoint(mouse_pos):
             self.input_active = True
@@ -248,9 +265,108 @@ class UIManager:
                 
         return actions
     
+    def is_keyboard_captured(self) -> bool:
+        """
+        Whether a text field or dialog currently owns the keyboard.
+
+        Editor shortcuts are bare letters, so the app must not act on a keypress
+        that is meant for a text field. This is the single place that answers
+        "is someone typing?".
+        """
+        return bool(
+            self.input_active
+            or self.adding_symbol
+            or self.file_prompt_mode
+            or self.confirm_intent
+        )
+
+    def is_modal_active(self) -> bool:
+        """Whether a modal dialog is open and should absorb all input."""
+        return bool(self.file_prompt_mode or self.confirm_intent)
+
+    def show_file_prompt(self, mode: str, default_name: str = ""):
+        """Open the filename prompt in 'save' or 'load' mode."""
+        self.file_prompt_mode = mode
+        self.file_prompt_text = default_name
+        self.input_active = False
+
+    def hide_file_prompt(self):
+        """Close the filename prompt."""
+        self.file_prompt_mode = None
+        self.file_prompt_text = ""
+
+    def show_confirm(self, message: str, intent: str):
+        """Open a yes/no dialog guarding `intent`."""
+        self.confirm_message = message
+        self.confirm_intent = intent
+        self.input_active = False
+
+    def hide_confirm(self):
+        """Close the confirmation dialog."""
+        self.confirm_message = ""
+        self.confirm_intent = None
+
+    def sync_symbols_with(self, dfa: DFA):
+        """
+        Make sure every symbol used by the automaton appears in the palette.
+
+        The palette and the automaton's alphabet are still two separate things
+        (they are unified in a later phase), so loading a file over a different
+        alphabet would otherwise leave its symbols undrawable.
+        """
+        for symbol in sorted(dfa.alphabet):
+            if symbol not in self.available_symbols:
+                self.available_symbols.append(symbol)
+        if self.selected_symbol not in self.available_symbols and self.available_symbols:
+            self.selected_symbol = self.available_symbols[0]
+
+    def _handle_file_prompt_key(self, event) -> Dict[str, Any]:
+        """Handle keys while the filename prompt is open."""
+        actions: Dict[str, Any] = {}
+
+        if event.key == pygame.K_ESCAPE:
+            self.hide_file_prompt()
+            actions['file_prompt_cancel'] = True
+        elif event.key == pygame.K_RETURN:
+            mode = self.file_prompt_mode
+            name = self.file_prompt_text.strip()
+            self.hide_file_prompt()
+            if name:
+                actions['save_to_path' if mode == 'save' else 'load_to_path'] = name
+            else:
+                actions['file_prompt_cancel'] = True
+        elif event.key == pygame.K_BACKSPACE:
+            self.file_prompt_text = self.file_prompt_text[:-1]
+        elif event.unicode.isprintable() and len(self.file_prompt_text) < 120:
+            self.file_prompt_text += event.unicode
+
+        return actions
+
+    def _handle_confirm_key(self, event) -> Dict[str, Any]:
+        """Handle keys while the confirmation dialog is open."""
+        actions: Dict[str, Any] = {}
+
+        if event.key in (pygame.K_y, pygame.K_RETURN):
+            intent = self.confirm_intent
+            self.hide_confirm()
+            actions['confirmed'] = intent
+        elif event.key in (pygame.K_n, pygame.K_ESCAPE):
+            self.hide_confirm()
+            actions['confirm_cancel'] = True
+
+        return actions
+
     def _handle_key_down(self, event) -> Dict[str, Any]:
         """Handle key down events."""
         actions: Dict[str, Any] = {}
+
+        # Dialogs are modal, and they are checked before anything else so that
+        # keys reach the topmost one only.
+        if self.confirm_intent:
+            return self._handle_confirm_key(event)
+
+        if self.file_prompt_mode:
+            return self._handle_file_prompt_key(event)
 
         if self.adding_symbol:
             # Handle symbol addition dialog
@@ -333,6 +449,76 @@ class UIManager:
 
         if self.adding_symbol:
             self._draw_add_symbol_dialog()
+
+        # Modal dialogs paint last so nothing is drawn over them.
+        if self.file_prompt_mode:
+            self._draw_file_prompt()
+
+        if self.confirm_intent:
+            self._draw_confirm_dialog()
+
+    def _draw_modal_frame(self, width: int, height: int, title: str) -> pygame.Rect:
+        """Dim the screen and draw an empty centred dialog box, returning it."""
+        overlay = pygame.Surface((self.screen_width, self.screen_height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 120))
+        self.screen.blit(overlay, (0, 0))
+
+        rect = pygame.Rect(
+            (self.screen_width - width) // 2,
+            (self.screen_height - height) // 2,
+            width,
+            height,
+        )
+        pygame.draw.rect(self.screen, self.colors['ui_bg'], rect)
+        pygame.draw.rect(self.screen, self.colors['ui_border'], rect, 3)
+
+        title_surface = self.font_medium.render(title, True, self.colors['text'])
+        title_rect = title_surface.get_rect(centerx=rect.centerx, y=rect.y + 15)
+        self.screen.blit(title_surface, title_rect)
+
+        return rect
+
+    def _draw_file_prompt(self):
+        """Draw the filename prompt."""
+        verb = "Save as" if self.file_prompt_mode == 'save' else "Load file"
+        rect = self._draw_modal_frame(440, 160, verb)
+
+        hint = self.font_small.render(
+            "Relative to the project folder. '.json' is added if omitted.",
+            True, self.colors['text'])
+        self.screen.blit(hint, (rect.x + 20, rect.y + 48))
+
+        field = pygame.Rect(rect.x + 20, rect.y + 72, rect.width - 40, 30)
+        pygame.draw.rect(self.screen, self.colors['input_active'], field)
+        pygame.draw.rect(self.screen, self.colors['ui_border'], field, 2)
+
+        # Show the tail of the text so the caret stays visible on long paths.
+        shown = self.file_prompt_text[-40:]
+        text_surface = self.font_medium.render(shown, True, self.colors['text'])
+        text_rect = text_surface.get_rect(midleft=(field.left + 6, field.centery))
+        self.screen.blit(text_surface, text_rect)
+
+        if pygame.time.get_ticks() % 1000 < 500:
+            caret_x = min(text_rect.right + 2, field.right - 4)
+            pygame.draw.line(self.screen, self.colors['text'],
+                             (caret_x, field.top + 5), (caret_x, field.bottom - 5), 2)
+
+        footer = self.font_small.render("Enter to confirm, Escape to cancel",
+                                        True, self.colors['text'])
+        self.screen.blit(footer, footer.get_rect(centerx=rect.centerx,
+                                                 y=rect.bottom - 26))
+
+    def _draw_confirm_dialog(self):
+        """Draw the yes/no confirmation dialog."""
+        rect = self._draw_modal_frame(420, 130, "Unsaved changes")
+
+        message = self.font_medium.render(self.confirm_message, True, self.colors['text'])
+        self.screen.blit(message, message.get_rect(centerx=rect.centerx, y=rect.y + 55))
+
+        footer = self.font_small.render("Y or Enter to confirm, N or Escape to cancel",
+                                        True, self.colors['text'])
+        self.screen.blit(footer, footer.get_rect(centerx=rect.centerx,
+                                                 y=rect.bottom - 30))
 
     def _draw_toolbar(self):
         """Draw the main toolbar at the top of the screen."""
