@@ -57,6 +57,9 @@ class EdgeVisual:
     key: Tuple[str, str]
     path: Sequence[Point]
     label: str
+    label_at: Optional[Point] = None
+    """Where the label goes, when the midpoint of the path is a bad place --
+    inside a self-loop, for instance."""
     color_index: int = 0
     active: float = 0.0
     """How lit this edge is, while a run is traversing it."""

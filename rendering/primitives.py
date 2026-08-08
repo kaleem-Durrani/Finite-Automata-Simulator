@@ -83,6 +83,68 @@ def ring(surface: pygame.Surface, centre: Point, radius: float, width: float,
     pygame.gfxdraw.aacircle(surface, x, y, radius, color)
 
 
+def dashed_ring(surface: pygame.Surface, centre: Point, radius: float,
+                width: float, color: Color, dashes: int = 16,
+                duty: float = 0.55) -> None:
+    """A circular outline broken into dashes.
+
+    Used for states no word can reach. A dash pattern is a *shape* difference,
+    so it still reads when the colour does not -- in greyscale, on a projector,
+    or to a colour-blind reader.
+    """
+    radius = int(radius)
+    if radius < 2 or dashes < 1:
+        return
+
+    span = 2 * math.pi / dashes
+    for i in range(dashes):
+        start = i * span
+        end = start + span * duty
+        steps = max(2, int(radius * span / 3))
+        arc = [
+            (centre[0] + math.cos(start + (end - start) * s / steps) * radius,
+             centre[1] + math.sin(start + (end - start) * s / steps) * radius)
+            for s in range(steps + 1)
+        ]
+        stroke_path(surface, arc, width, color)
+
+
+def hatch_circle(surface: pygame.Surface, centre: Point, radius: float,
+                 color: Color, spacing: float = 7.0, width: int = 1,
+                 angle: float = math.pi / 4) -> None:
+    """Fill a circle with diagonal lines.
+
+    The second signal that marks a trap state, alongside its colour. Drawn on a
+    scratch surface and masked to the circle, because clipping each line to the
+    boundary analytically is more code for the same pixels.
+    """
+    radius = int(radius)
+    if radius < 4:
+        return
+
+    size = radius * 2 + 2
+    layer = pygame.Surface((size, size), pygame.SRCALPHA)
+
+    direction = (math.cos(angle), math.sin(angle))
+    normal = (-direction[1], direction[0])
+    reach = size * 1.5
+    steps = int(reach / spacing)
+    for i in range(-steps, steps + 1):
+        offset_x = normal[0] * i * spacing + size / 2
+        offset_y = normal[1] * i * spacing + size / 2
+        pygame.draw.line(
+            layer, color,
+            (offset_x - direction[0] * reach, offset_y - direction[1] * reach),
+            (offset_x + direction[0] * reach, offset_y + direction[1] * reach),
+            width)
+
+    mask = pygame.Surface((size, size), pygame.SRCALPHA)
+    pygame.gfxdraw.filled_circle(mask, size // 2, size // 2, radius,
+                                 (255, 255, 255, 255))
+    layer.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+    surface.blit(layer, (int(centre[0]) - size // 2, int(centre[1]) - size // 2))
+
+
 def soft_shadow(surface: pygame.Surface, centre: Point, radius: float,
                 color: Color, layers: int = 5, spread: float = 5.0) -> None:
     """A blurred disc under a node, to lift it off the canvas.

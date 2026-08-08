@@ -223,6 +223,60 @@ def test_opposite_edges_do_not_overlap():
     assert (mid_f[1] - line_y) * (mid_b[1] - line_y) < 0
 
 
+# ---------------------------------------------------------------------------
+# Self-loop placement
+# ---------------------------------------------------------------------------
+
+
+def test_a_lone_state_loops_upwards():
+    assert g.quietest_direction(SOURCE, []) == pytest.approx(-math.pi / 2)
+
+
+def test_a_loop_points_away_from_the_other_edges():
+    """A fixed loop direction sits on top of whatever else meets the node."""
+    # One neighbour directly above: the loop should point down.
+    angle = g.quietest_direction(SOURCE, [(SOURCE[0], SOURCE[1] - 200)])
+    assert math.sin(angle) > 0.9
+
+    # One neighbour to the right: the loop should point left.
+    angle = g.quietest_direction(SOURCE, [(SOURCE[0] + 200, SOURCE[1])])
+    assert math.cos(angle) < -0.9
+
+
+def test_a_loop_splits_the_difference_between_neighbours():
+    """Two neighbours left and right, so the loop goes up or down, not sideways."""
+    angle = g.quietest_direction(SOURCE, [(SOURCE[0] - 200, SOURCE[1]),
+                                          (SOURCE[0] + 200, SOURCE[1])])
+    assert abs(math.cos(angle)) < 0.2
+
+
+def test_symmetric_neighbours_fall_back_to_the_default():
+    """Nothing is quieter than anything else, so pick the default."""
+    angle = g.quietest_direction(SOURCE, [(SOURCE[0] - 100, SOURCE[1]),
+                                          (SOURCE[0] + 100, SOURCE[1]),
+                                          (SOURCE[0], SOURCE[1] - 100),
+                                          (SOURCE[0], SOURCE[1] + 100)])
+    assert angle == pytest.approx(-math.pi / 2)
+
+
+def test_a_loop_label_sits_outside_the_loop():
+    """Placed at the path midpoint it lands inside the loop, on the node."""
+    angle = -math.pi / 2
+    anchor = g.self_loop_label_anchor(SOURCE, RADIUS, angle)
+    path = g.self_loop_path(SOURCE, RADIUS, angle)
+
+    assert g.distance(anchor, SOURCE) > RADIUS * 1.5
+    furthest = max(g.distance(p, SOURCE) for p in path)
+    assert g.distance(anchor, SOURCE) >= furthest * 0.85
+
+
+def test_a_loop_label_follows_the_loop_direction():
+    up = g.self_loop_label_anchor(SOURCE, RADIUS, -math.pi / 2)
+    down = g.self_loop_label_anchor(SOURCE, RADIUS, math.pi / 2)
+    assert up[1] < SOURCE[1]
+    assert down[1] > SOURCE[1]
+
+
 def test_label_anchor_sits_off_the_line():
     path = g.edge_path(SOURCE, TARGET, RADIUS, RADIUS, 0.0)
     on_line = g.label_anchor(path, 0.0)

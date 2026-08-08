@@ -8,15 +8,18 @@ crashes lived (it fired every frame, so the process could not recover).
 """
 
 import json
+import math
 from pathlib import Path
 
 import pygame
 import pytest
 
+import fsa
 import main as main_module
 import ui.ui_manager as ui_manager_module
 from core.state import StateType
 from main import AutomatonSimulator
+from rendering.scene import NodeKind
 
 
 @pytest.fixture
@@ -756,6 +759,114 @@ def test_dead_states_are_derived_from_the_transition_function(app):
     app._invalidate_engine()
     app.engine()
     assert app._dead_states == frozenset()
+
+
+def test_nothing_is_a_trap_when_nothing_accepts(app):
+    """With no accepting state, every state is technically dead.
+
+    True, and useless: it greyed out the entire canvas while the user was
+    still drawing, before they had marked anything accepting. The real problem
+    then is "no accepting states", which analysis reports separately.
+    """
+    app.dfa = type(app.dfa)()
+    for position in [(0, 0), (100, 0), (200, 0)]:
+        app.dfa.add_state(position)
+    app.dfa.add_transition("q0", "q1", "a")
+    app.dfa.add_transition("q1", "q2", "a")
+    app._invalidate_engine()
+
+    automaton = app.engine()
+    assert automaton.accept == frozenset()
+    assert fsa.dead_states(automaton) == {"q0", "q1", "q2"}, "the maths is unchanged"
+    assert app._dead_states == frozenset(), "but the display does not shout about it"
+
+    kinds = {node.id: node.kind for node in app._build_scene().nodes}
+    assert set(kinds.values()) == {NodeKind.NORMAL}
+
+
+def test_traps_are_shown_once_something_accepts(app):
+    app.dfa = type(app.dfa)()
+    for position in [(0, 0), (100, 0), (200, 0)]:
+        app.dfa.add_state(position)
+    app.dfa.add_transition("q0", "q1", "a")
+    app.dfa.add_transition("q0", "q2", "b")
+    app.dfa.add_transition("q2", "q2", "a")
+    app.dfa.set_state_type("q1", StateType.ACCEPT)
+    app._invalidate_engine()
+
+    kinds = {node.id: node.kind for node in app._build_scene().nodes}
+    assert kinds["q0"] is NodeKind.NORMAL
+    assert kinds["q1"] is NodeKind.NORMAL
+    assert kinds["q2"] is NodeKind.DEAD
+
+
+def test_unreachable_takes_priority_over_dead(app):
+    """A state no word can enter cannot trap anything.
+
+    "You can never get here" is the more useful of the two facts.
+    """
+    app.dfa = type(app.dfa)()
+    for position in [(0, 0), (100, 0), (200, 0)]:
+        app.dfa.add_state(position)
+    app.dfa.add_transition("q0", "q1", "a")
+    app.dfa.set_state_type("q1", StateType.ACCEPT)
+    app._invalidate_engine()
+    app.engine()
+
+    assert "q2" in app._dead_states, "it is both..."
+    assert "q2" in app._unreachable_states, "...and unreachable"
+
+    kinds = {node.id: node.kind for node in app._build_scene().nodes}
+    assert kinds["q2"] is NodeKind.UNREACHABLE, "unreachable is the fact worth showing"
+
+
+def test_the_legend_lists_only_what_is_on_screen(app):
+    app.dfa = type(app.dfa)()
+    app.dfa.add_state((0, 0))
+    app.dfa.set_state_type("q0", StateType.ACCEPT)
+    app._invalidate_engine()
+    app._build_scene()
+    assert app.ui_manager.legend_dead is False
+    assert app.ui_manager.legend_unreachable is False
+
+    app.dfa.add_state((100, 0))          # unreachable
+    app.dfa.add_state((200, 0))          # reachable but a trap
+    app.dfa.add_transition("q0", "q2", "a")
+    app.dfa.add_transition("q2", "q2", "a")
+    app._invalidate_engine()
+    app._build_scene()
+    assert app.ui_manager.legend_dead is True
+    assert app.ui_manager.legend_unreachable is True
+
+
+def test_self_loops_point_away_from_other_edges(app):
+    """A loop drawn in a fixed direction lands on top of arriving arrows."""
+    app.dfa = type(app.dfa)()
+    app.dfa.add_state((0, 0))
+    app.dfa.add_state((0, -200))         # neighbour directly above
+    app.dfa.add_transition("q1", "q0", "a")
+    app.dfa.add_transition("q0", "q0", "b")
+    app._structural_change()
+
+    angles = app._loop_angles()
+    assert math.sin(angles["q0"]) > 0.8, "loop should hang below, away from q1"
+
+    loop = next(e for e in app._build_scene().edges if e.key == ("q0", "q0"))
+    assert all(point[1] > -1 for point in loop.path), "no part of it goes upward"
+
+
+def test_each_state_kind_is_visually_distinct():
+    """Fill, ring and shape must all differ; colour alone was not enough."""
+    from rendering.theme import Theme
+
+    for name in ("dark", "light"):
+        palette = Theme(name).palette
+        fills = {palette.state_fill, palette.accept_fill,
+                 palette.dead_fill, palette.unreachable_fill}
+        rings = {palette.state_ring, palette.accept_ring,
+                 palette.dead_ring, palette.unreachable_ring}
+        assert len(fills) == 4, f"{name}: fills must differ"
+        assert len(rings) == 4, f"{name}: rings must differ"
 
 
 def test_app_language_matches_the_transition_function(app):

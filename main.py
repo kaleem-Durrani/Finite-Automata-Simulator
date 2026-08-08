@@ -32,7 +32,7 @@ from core.state import StateType
 from rendering import geometry
 from rendering.animation import Animated, AnimatedPoint, Track, ease_in_out, ease_out_back
 from rendering.fonts import FontBook
-from rendering.renderer import Renderer, default_state_radius, loop_angle_for
+from rendering.renderer import Renderer, default_state_radius
 from rendering.scene import (
     EdgeVisual,
     GhostEdge,
@@ -590,8 +590,13 @@ class AutomatonSimulator:
         Separate from the dirty flag: dragging a state changes the document but
         not the automaton, and rebuilding on every mouse-motion event would be
         wasteful.
+
+        The derived sets are cleared too, so nothing can read a stale answer
+        between here and the next rebuild.
         """
         self._engine = None
+        self._dead_states = frozenset()
+        self._unreachable_states = frozenset()
 
     def engine(self) -> fsa.DFA:
         """The automaton as the engine sees it.
@@ -614,8 +619,18 @@ class AutomatonSimulator:
                 initial if initial in self.dfa.states else None)
 
             self._engine = automaton
-            self._dead_states = fsa.dead_states(automaton)
             self._unreachable_states = fsa.unreachable_states(automaton)
+
+            # With no accepting state, *every* state is technically a trap:
+            # nothing can reach acceptance because there is nothing to reach.
+            # True, and useless -- it greys out the whole canvas while the user
+            # is still drawing, before they have marked anything accepting.
+            # The real problem in that case is "no accepting states", which
+            # analysis already reports on its own.
+            if automaton.accept:
+                self._dead_states = fsa.dead_states(automaton)
+            else:
+                self._dead_states = frozenset()
         return self._engine
 
     # ------------------------------------------------------------------
@@ -1039,11 +1054,32 @@ class AutomatonSimulator:
         except ValueError:
             return len(alphabet)
 
+    def _loop_angles(self) -> Dict[str, float]:
+        """Where each state's self-loop should point.
+
+        Away from the average direction of that state's other edges, so a loop
+        does not sit on top of an arrow arriving at the same node.
+        """
+        neighbours: Dict[str, List[Tuple[float, float]]] = {}
+        for (source_id, target_id) in self.dfa.transition_groups:
+            if source_id == target_id:
+                continue
+            for a, b in ((source_id, target_id), (target_id, source_id)):
+                other = self.dfa.states.get(b)
+                if a in self.dfa.states and other is not None:
+                    neighbours.setdefault(a, []).append(tuple(other.position))
+
+        return {
+            state_id: geometry.quietest_direction(
+                tuple(state.position), neighbours.get(state_id, []))
+            for state_id, state in self.dfa.states.items()
+        }
+
     def _edge_paths(self) -> Dict[Tuple[str, str], List[Tuple[float, float]]]:
         """The drawn path of every transition group, in world coordinates."""
         radius = default_state_radius()
         paths: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
-        loop_counter = 0
+        self._loop_angle_cache = self._loop_angles()
 
         for key, group in self.dfa.transition_groups.items():
             source_id, target_id = key
@@ -1055,8 +1091,7 @@ class AutomatonSimulator:
             if source_id == target_id:
                 paths[key] = geometry.self_loop_path(
                     tuple(source.position), radius,
-                    angle=loop_angle_for(loop_counter))
-                loop_counter += 1
+                    angle=self._loop_angle_cache[source_id])
                 continue
 
             arc = float(group.get('arc_offset', 0.0))
@@ -1080,26 +1115,41 @@ class AutomatonSimulator:
         self.engine()  # refreshes the derived dead/unreachable sets
         radius = default_state_radius()
         scene = Scene()
+        self.ui_manager.legend_dead = False
+        self.ui_manager.legend_unreachable = False
 
         edge_paths = self._edge_paths()
         for key, path in edge_paths.items():
             group = self.dfa.transition_groups[key]
             symbols = sorted(group['symbols'])
+            label_at = None
+            if key[0] == key[1]:
+                state = self.dfa.states[key[0]]
+                label_at = geometry.self_loop_label_anchor(
+                    tuple(state.position), radius,
+                    self._loop_angle_cache[key[0]])
             scene.edges.append(EdgeVisual(
                 key=key,
                 path=path,
                 label=", ".join(symbols),
+                label_at=label_at,
                 color_index=self._symbol_index(symbols[0]) if symbols else 0,
                 active=self.edge_active.get(f"{key[0]}|{key[1]}"),
             ))
 
         for state_id, state in self.dfa.states.items():
-            if state_id in self._dead_states:
-                kind = NodeKind.DEAD
-            elif state_id in self._unreachable_states:
+            # Unreachable wins over dead. A state no word can enter cannot
+            # trap anything, so "you can never get here" is the more useful of
+            # the two facts.
+            if state_id in self._unreachable_states:
                 kind = NodeKind.UNREACHABLE
+            elif state_id in self._dead_states:
+                kind = NodeKind.DEAD
             else:
                 kind = NodeKind.NORMAL
+
+            self.ui_manager.legend_dead |= kind is NodeKind.DEAD
+            self.ui_manager.legend_unreachable |= kind is NodeKind.UNREACHABLE
 
             scene.nodes.append(NodeVisual(
                 id=state_id,

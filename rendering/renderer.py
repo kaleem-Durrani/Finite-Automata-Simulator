@@ -10,7 +10,6 @@ over it; transition labels were routinely buried under the states they
 connected.
 """
 
-import math
 from typing import List, Optional, Sequence, Tuple
 
 import pygame
@@ -152,37 +151,52 @@ class Renderer:
         primitives.soft_shadow(self.screen, centre, radius, palette.shadow,
                                spread=5 * max(0.6, zoom))
 
+        # Each kind gets its own fill and ring colour, and its own shape signal:
+        # accepting states carry a second ring, traps a diagonal hatch,
+        # unreachable states a dashed outline. Colour alone was not enough --
+        # normal and trap differed only by a slightly darker grey, which is no
+        # difference at all on a projector or to a colour-blind reader.
         if node.kind is NodeKind.DEAD:
             fill = palette.dead_fill
             ring_color = palette.dead_ring
+        elif node.kind is NodeKind.UNREACHABLE:
+            fill = palette.unreachable_fill
+            ring_color = palette.unreachable_ring
+        elif node.is_accept:
+            fill = palette.accept_fill
+            ring_color = palette.accept_ring
         else:
             fill = palette.state_fill
             ring_color = palette.state_ring
 
-        if node.kind is NodeKind.UNREACHABLE:
-            ring_color = palette.unreachable_ring
-
         # Interaction states blend on top, strongest last.
         if node.hover > 0.01:
-            ring_color = _mix(ring_color, palette.hover_ring, node.hover)
+            ring_color = _mix(ring_color, palette.hover_ring, node.hover * 0.7)
         if node.selected > 0.01:
             ring_color = _mix(ring_color, palette.selected_ring, node.selected)
         if node.active > 0.01:
             ring_color = _mix(ring_color, palette.active_ring, node.active)
-            fill = _mix(fill, palette.active_glow[:3], 0.18 * node.active)
+            fill = _mix(fill, palette.active_glow[:3], 0.22 * node.active)
 
         primitives.filled_circle(self.screen, centre, radius, fill)
 
-        weight = max(1.0, (1.8 + 1.4 * max(node.selected, node.active)) * min(2.0, zoom))
-        primitives.ring(self.screen, centre, radius, weight, ring_color)
+        if node.kind is NodeKind.DEAD and radius > 8:
+            primitives.hatch_circle(self.screen, centre, radius - 1,
+                                    palette.dead_hatch,
+                                    spacing=max(5.0, 7.0 * zoom))
+
+        weight = max(1.4, (2.0 + 1.4 * max(node.selected, node.active)) * min(2.0, zoom))
+        if node.kind is NodeKind.UNREACHABLE:
+            primitives.dashed_ring(self.screen, centre, radius, weight, ring_color)
+        else:
+            primitives.ring(self.screen, centre, radius, weight, ring_color)
 
         if node.is_accept:
-            inner = max(3.0, radius * 0.78)
-            accept_color = palette.accept_ring
-            if node.kind is NodeKind.DEAD:
-                accept_color = palette.dead_ring
+            inner = max(3.0, radius * 0.76)
+            accept_color = (palette.dead_ring if node.kind is NodeKind.DEAD
+                            else palette.accept_ring)
             primitives.ring(self.screen, centre, inner,
-                            max(1.0, 1.6 * min(2.0, zoom)), accept_color)
+                            max(1.2, 1.8 * min(2.0, zoom)), accept_color)
 
     def _draw_node_label(self, node: NodeVisual) -> None:
         zoom = self.camera.zoom
@@ -190,8 +204,12 @@ class Renderer:
             return
 
         palette = self.theme.palette
-        colour = (palette.dead_text if node.kind is NodeKind.DEAD
-                  else palette.state_text)
+        if node.kind is NodeKind.DEAD:
+            colour = palette.dead_text
+        elif node.kind is NodeKind.UNREACHABLE:
+            colour = palette.unreachable_text
+        else:
+            colour = palette.state_text
         font = self.fonts.scaled("state", zoom)
         surface = font.render(node.label, True, colour)
         centre = self.camera.world_to_screen(node.position)
@@ -233,7 +251,10 @@ class Renderer:
 
         palette = self.theme.palette
         path = self._to_screen(edge.path)
-        anchor = geometry.label_anchor(path, -13.0 * min(1.6, zoom))
+        if edge.label_at is not None:
+            anchor = self.camera.world_to_screen(edge.label_at)
+        else:
+            anchor = geometry.label_anchor(path, -13.0 * min(1.6, zoom))
 
         font = self.fonts.scaled("edge", zoom)
         colour = palette.label_text
@@ -271,9 +292,10 @@ class Renderer:
         screen_path = self._to_screen(path)
         zoom = self.camera.zoom
         primitives.stroke_path(self.screen, screen_path,
-                               max(1.4, 2.0 * min(2.0, zoom)), palette.text_muted)
-        head = geometry.arrowhead(screen_path, max(6.0, 10.0 * min(2.0, zoom)))
-        primitives.polygon(self.screen, head, palette.text_muted)
+                               max(1.8, 2.6 * min(2.0, zoom)),
+                               palette.initial_marker)
+        head = geometry.arrowhead(screen_path, max(7.0, 12.0 * min(2.0, zoom)))
+        primitives.polygon(self.screen, head, palette.initial_marker)
 
     # ------------------------------------------------------------------
     # Execution
@@ -333,14 +355,3 @@ class Renderer:
 def default_state_radius() -> float:
     """The world radius of a state. One definition, used by app and renderer."""
     return STATE_RADIUS
-
-
-def loop_angle_for(index: int) -> float:
-    """Where a self-loop should point, so adjacent loops do not overlap.
-
-    Cycles through up, upper-right, upper-left and so on rather than putting
-    every loop in the same place above its node.
-    """
-    offsets = (-math.pi / 2, -math.pi / 2 + 0.85, -math.pi / 2 - 0.85,
-               math.pi / 2, math.pi / 2 + 0.85, math.pi / 2 - 0.85)
-    return offsets[index % len(offsets)]

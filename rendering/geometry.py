@@ -281,6 +281,42 @@ def self_loop_path(centre: Point, radius: float, angle: float = -math.pi / 2,
     return cubic(start, control_a, control_b, end, segment_count(extent * 3))
 
 
+def quietest_direction(centre: Point, neighbours: Sequence[Point],
+                       fallback: float = -math.pi / 2) -> float:
+    """The angle with the fewest edges near it, for placing a self-loop.
+
+    A loop drawn in a fixed direction sits on top of whatever else meets that
+    node. Pointing it away from the average direction of the node's other edges
+    keeps it clear without needing a layout pass.
+    """
+    if not neighbours:
+        return fallback
+
+    sum_x = sum_y = 0.0
+    for point in neighbours:
+        dx, dy = direction(centre, point)
+        sum_x += dx
+        sum_y += dy
+
+    if math.hypot(sum_x, sum_y) < 1e-6:
+        return fallback
+    return math.atan2(-sum_y, -sum_x)
+
+
+def self_loop_label_anchor(centre: Point, radius: float, angle: float,
+                           reach: float = SELF_LOOP_REACH,
+                           clearance: float = 15.0) -> Point:
+    """Where a self-loop's label goes: just beyond the top of the loop.
+
+    Placing it at the path midpoint with a perpendicular nudge, as ordinary
+    edges do, puts it inside the loop where it collides with the node and with
+    any edge arriving at it.
+    """
+    extent = radius * reach * 0.72 + clearance
+    return (centre[0] + math.cos(angle) * extent,
+            centre[1] + math.sin(angle) * extent)
+
+
 def start_marker_path(centre: Point, radius: float,
                       angle: float = math.pi, length: float = 46.0) -> Path:
     """

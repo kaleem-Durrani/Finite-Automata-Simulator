@@ -51,17 +51,25 @@ class Palette:
     control_active: RGB
     field: RGB
 
-    # States
+    # States. Each kind differs in fill, in ring colour, *and* in a shape
+    # signal -- a double ring, a hatch, a dashed outline -- so the four are
+    # still distinguishable in greyscale or to a colour-blind reader. Colour
+    # here is reinforcement, never the only channel.
     state_fill: RGB
     state_ring: RGB
     state_text: RGB
+    accept_fill: RGB
     accept_ring: RGB
     active_ring: RGB
     active_glow: RGBA
     dead_fill: RGB
     dead_ring: RGB
     dead_text: RGB
+    dead_hatch: RGBA
+    unreachable_fill: RGB
     unreachable_ring: RGB
+    unreachable_text: RGB
+    initial_marker: RGB
     selected_ring: RGB
     hover_ring: RGB
 
@@ -117,18 +125,23 @@ DARK = Palette(
     control_active=(56, 189, 248),
     field=(15, 17, 21),
 
-    state_fill=(40, 45, 56),
-    state_ring=(94, 104, 122),
-    state_text=(228, 232, 240),
+    state_fill=(46, 53, 66),
+    state_ring=(128, 141, 163),
+    state_text=(232, 236, 244),
+    accept_fill=(30, 60, 54),
     accept_ring=(52, 211, 153),
     active_ring=(56, 189, 248),
     active_glow=(56, 189, 248, 46),
-    dead_fill=(31, 33, 39),
-    dead_ring=(72, 77, 89),
-    dead_text=(120, 127, 142),
-    unreachable_ring=(88, 78, 110),
+    dead_fill=(58, 34, 38),
+    dead_ring=(220, 110, 110),
+    dead_text=(214, 168, 168),
+    dead_hatch=(220, 110, 110, 70),
+    unreachable_fill=(34, 36, 43),
+    unreachable_ring=(120, 110, 145),
+    unreachable_text=(140, 133, 160),
+    initial_marker=(148, 160, 180),
     selected_ring=(251, 191, 36),
-    hover_ring=(140, 150, 168),
+    hover_ring=(176, 186, 204),
 
     edge=(112, 122, 140),
     edge_muted=(66, 72, 85),
@@ -184,17 +197,22 @@ LIGHT = Palette(
     field=(255, 255, 255),
 
     state_fill=(255, 255, 255),
-    state_ring=(64, 64, 68),
-    state_text=(28, 28, 30),
+    state_ring=(52, 52, 56),
+    state_text=(24, 24, 26),
+    accept_fill=(233, 250, 242),
     accept_ring=(5, 150, 105),
     active_ring=(37, 99, 235),
     active_glow=(37, 99, 235, 34),
-    dead_fill=(240, 238, 234),
-    dead_ring=(178, 174, 168),
-    dead_text=(140, 137, 132),
-    unreachable_ring=(168, 156, 190),
+    dead_fill=(253, 237, 237),
+    dead_ring=(190, 60, 60),
+    dead_text=(146, 52, 52),
+    dead_hatch=(190, 60, 60, 60),
+    unreachable_fill=(247, 246, 249),
+    unreachable_ring=(140, 124, 170),
+    unreachable_text=(120, 110, 140),
+    initial_marker=(74, 74, 78),
     selected_ring=(217, 119, 6),
-    hover_ring=(120, 118, 114),
+    hover_ring=(96, 94, 90),
 
     edge=(74, 74, 78),
     edge_muted=(176, 173, 168),

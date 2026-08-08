@@ -15,8 +15,11 @@ then step through how a string is processed, one symbol at a time.
   up, and the input tape advances under a moving read head
 - **Step-by-step, in both directions** — walk forwards and backwards through the run, or play it
   back at an adjustable speed
-- **Derived trap states** — states from which no accepting state can be reached are computed from
-  the transition function and dimmed automatically
+- **Four visually distinct state kinds** — normal, accepting (double ring), trap (hatched), and
+  unreachable (dashed). Each differs in fill, ring colour *and* shape, so they stay
+  distinguishable in greyscale and to colour-blind readers. Traps and unreachable states are
+  derived from the transition function, not declared, and a legend appears listing whichever
+  kinds are actually on screen
 - **Dark and light themes** — toggle from the toolbar
 - **Pan and zoom** — with eased camera movement and fit-to-content
 - **Transition rendering** — anti-aliased curves, self-loops, bidirectional pairs separated

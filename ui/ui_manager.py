@@ -147,6 +147,11 @@ class UIManager:
         # while it is actually drawn.
         self.execution_panel_visible = False
 
+        # Which state kinds are present, so the legend lists only what is on
+        # screen. Set by the app, which is what computes them.
+        self.legend_dead = False
+        self.legend_unreachable = False
+
     # Fonts and colours are read through the shared theme, so there is exactly
     # one definition of "the colour of a border" in the application.
     @property
@@ -953,6 +958,56 @@ class UIManager:
             row_y += 19
 
         self._draw_animation_controls_in_status(info_x, row_y + 8)
+        self._draw_legend(dfa, panel_rect)
+
+    def _draw_legend(self, dfa: DFA, above: pygame.Rect) -> None:
+        """Explain the state styles, showing only the kinds actually present.
+
+        A diagram that dims some states and hatches others is only useful if
+        the reader knows what those mean. Listing every kind all the time would
+        be noise, so entries appear as the automaton acquires them.
+        """
+        palette = self.theme.palette
+        entries = [("normal", palette.state_fill, palette.state_ring, "plain")]
+
+        if dfa.accept_states:
+            entries.append(("accepting", palette.accept_fill,
+                            palette.accept_ring, "double"))
+        if self.legend_dead:
+            entries.append(("trap", palette.dead_fill, palette.dead_ring, "hatch"))
+        if self.legend_unreachable:
+            entries.append(("unreachable", palette.unreachable_fill,
+                            palette.unreachable_ring, "dashed"))
+
+        if len(entries) < 2:
+            return
+
+        row_h = 22
+        rect = pygame.Rect(above.x, above.bottom + 10, above.width,
+                           row_h * len(entries) + 30)
+        primitives.panel(self.screen, rect, palette.panel,
+                         radius=self.theme.radius.lg, border=palette.border)
+        self._section_label("Legend", (rect.x + self.theme.space.md,
+                                       rect.y + self.theme.space.md))
+
+        font = self.fonts.ui("small")
+        y = rect.y + 32
+        for label, fill, ring, style in entries:
+            centre = (rect.x + self.theme.space.md + 9, y + 7)
+            primitives.filled_circle(self.screen, centre, 9, fill)
+            if style == "hatch":
+                primitives.hatch_circle(self.screen, centre, 8,
+                                        palette.dead_hatch, spacing=4, width=1)
+            if style == "dashed":
+                primitives.dashed_ring(self.screen, centre, 9, 2, ring, dashes=8)
+            else:
+                primitives.ring(self.screen, centre, 9, 2, ring)
+            if style == "double":
+                primitives.ring(self.screen, centre, 6, 1, ring)
+
+            self.screen.blit(font.render(label, True, palette.text_muted),
+                             (rect.x + self.theme.space.md + 26, y))
+            y += row_h
 
     def _draw_animation_controls_in_status(self, x: int, y: int):
         """Playback speed, inside the status panel."""
