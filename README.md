@@ -89,22 +89,72 @@ is one, and vice versa.
 
 ## The bundled demo
 
-The simulator opens with a three-state demo over the alphabet `{a, b}`. It recognises the
-language **a\*b⁺** — any number of `a`s followed by at least one `b`:
+The simulator opens with a three-state demo over `{a, b}`. It recognises **a\*b⁺** — any number of
+`a`s followed by at least one `b`.
 
-| Input | Result |
+<!-- generated: fsa sample -->
+| Accepted | Rejected |
 |---|---|
-| `b` | accepted |
-| `ab` | accepted |
-| `aab` | accepted |
-| `abb` | accepted |
-| `a` | rejected |
-| `aa` | rejected |
-| `ba` | rejected |
-| `aba` | rejected |
-| *(empty)* | rejected |
+| `b` | *(empty)* |
+| `ab` | `a` |
+| `bb` | `aa` |
+| `aab` | `ba` |
+| `abb` | `aaa` |
+| `bbb` | `aba` |
+<!-- /generated -->
 
-`examples/simple_binary.json` contains a second automaton over `{0, 1}`.
+That table is produced by `fsa sample`, not written by hand — a test regenerates it and fails if
+the README drifts. The previous README listed three examples and had the verdict **inverted on all
+three**, which is exactly the failure mode generating it prevents.
+
+`examples/simple_binary.json` holds a second automaton over `{0, 1}`, recognising `0*1+`.
+
+## Command line
+
+The engine ships with a CLI that needs no display and no pygame:
+
+```
+fsa test    machine.json 0110     # run a word; exit 0 accepted, 1 rejected
+fsa run     machine.json 0110     # ...and show every step
+fsa check   machine.json          # structural problems; exit 1 if any
+fsa show    machine.json          # the transition table
+fsa sample  machine.json -n 10    # words it accepts, shortest first
+fsa export  machine.json -f svg   # dot | tikz | svg
+fsa new     machine.json -a 0 1   # an empty automaton
+fsa gui                           # the editor, from a checkout
+```
+
+Exit codes are the point: **0** means yes, **1** means no, **2** means it could not run. So
+`fsa test m.json 0110 && echo in-the-language` works, and a marking script can loop over
+submissions and branch on the status without parsing anything.
+
+```console
+$ fsa run examples/simple_binary.json 011
+      state  read  next
+      -----  ----  ----
+   0  q0      0    q0
+   1  q0      1    q1
+   2  q1      1    q1
+      q1           (accepting)
+
+'011' was accepted in q1
+```
+
+## Exporting
+
+Three formats, three jobs:
+
+| Format | Use it when |
+|---|---|
+| **SVG** | You want the diagram you drew. Shares its geometry with the on-screen renderer, so the curves are literally the same curves. |
+| **DOT** | You want Graphviz to lay it out properly. Positions are deliberately not passed through. |
+| **TikZ** | It is going into LaTeX. Positions are carried over; loops and bends become TikZ options so it looks native. |
+
+```bash
+fsa export machine.json -f svg  -o figure.svg
+fsa export machine.json -f dot  | dot -Tpng > figure.png
+fsa export machine.json -f tikz -o figure.tex
+```
 
 ## File format
 
@@ -145,14 +195,17 @@ src/fsa/                   the automata engine -- no pygame, no dependencies
   automaton.py               immutable DFA; flat transition function
   simulate.py                Run, Verdict, and explain()
   analysis.py                reachability, dead states, defects
+  language.py                enumerating accepted words
   layout.py                  positions and curve offsets
   document.py                an automaton together with its layout
   serialize.py               versioned, byte-stable JSON
+  geometry.py                path maths, shared by the renderer and the exporters
+  cli.py                     the command line
+  export/                    dot, tikz, svg
 rendering/
   camera.py                  viewport pan and zoom
   theme.py                   design tokens: two palettes, one set of names
   fonts.py                   system font selection and caching
-  geometry.py                path maths -- edges, self-loops, arrowheads
   primitives.py              anti-aliased drawing over gfxdraw
   animation.py               easing curves and interpolated values
   scene.py                   what to draw, described without pixels
@@ -189,10 +242,15 @@ These are known and tracked. Listing them here rather than letting you discover 
 
 ```bash
 pip install -e ".[dev]"
-ruff check .      # lint
-mypy              # type check
-pytest            # tests, headless
+ruff check .          # lint
+mypy                  # type check
+mypy --strict src/fsa # the engine is held to a higher standard
+pytest                # tests, headless
 ```
+
+`pip install .` installs the engine and the `fsa` command with **no** dependencies at all —
+pygame is an optional `[gui]` extra. CI installs into a clean environment with pygame absent and
+drives the CLI there, so "works without a display" is checked rather than claimed.
 
 `src/fsa/` is the automata engine: immutable, dependency-free, and importable without a display.
 Everything is a value, so a snapshot cannot change underneath the code holding it.
@@ -212,8 +270,8 @@ display. CI enforces this by parsing the import statements.
 
 ## Roadmap
 
-In rough order: move the editor itself onto the engine and retire `core/`; add a CLI and
-DOT/TikZ/SVG export; undo; edit and delete individual transitions; then minimisation, equivalence
+In rough order: explain rejections on the canvas as well as in the status line, with a
+diagnostics panel; undo; edit and delete individual transitions; then minimisation, equivalence
 checking with counterexamples, and NFA support.
 
 ## License

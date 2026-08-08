@@ -49,6 +49,27 @@ jobs:
       - name: Documented examples must run
         run: cd src && python -m doctest fsa/__init__.py
 
+      # The engine and its CLI have to be usable on a machine with no graphics
+      # stack at all -- that is the point of keeping them dependency-free.
+      - name: Install without pygame and drive the CLI
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/python -m pip install --quiet .
+          /tmp/clean/bin/python -c "import importlib.util, sys;             sys.exit(0 if importlib.util.find_spec('pygame') is None else 1)"
+          /tmp/clean/bin/fsa --version
+          /tmp/clean/bin/fsa show examples/simple_binary.json
+          /tmp/clean/bin/fsa test examples/simple_binary.json 011
+          if /tmp/clean/bin/fsa test examples/simple_binary.json 101; then
+            echo "::error::a rejected word must exit non-zero"; exit 1
+          fi
+          /tmp/clean/bin/fsa export examples/simple_binary.json -f svg > /dev/null
+
+      - name: Exports must parse
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq graphviz
+          cd src && python -m fsa export ../examples/simple_binary.json -f dot             | dot -Tsvg > /dev/null
+          python -m fsa export ../examples/simple_binary.json -f svg             | python -c "import sys, xml.etree.ElementTree as ET; ET.fromstring(sys.stdin.read())"
+
       # The engine has to stay usable without a display, and dependency-free.
       # This is the architectural boundary stated as a build failure rather
       # than as a convention.

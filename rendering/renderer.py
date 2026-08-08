@@ -14,7 +14,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import pygame
 
-from rendering import geometry, primitives
+from fsa import geometry
+from rendering import primitives
 from rendering.camera import Camera
 from rendering.fonts import FontBook
 from rendering.scene import EdgeVisual, NodeKind, NodeVisual, Scene

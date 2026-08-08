@@ -24,6 +24,9 @@ dependencies = []
 gui = ["pygame>=2.6,<3"]
 dev = ["ruff>=0.16", "mypy>=1.11", "pytest>=8.0"]
 
+[project.scripts]
+fsa = "fsa.cli:run_main"
+
 [project.urls]
 Repository = "https://github.com/kaleem-Durrani/Finite-Automata-Simulator"
 

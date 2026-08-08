@@ -14,6 +14,7 @@ imports pygame, and CI enforces that. The GUI is one front end among several.
     "'aa' was rejected: no transition from q1 on 'a' at position 1 -- this automaton is incomplete"
 """
 
+from fsa import export, geometry, language
 from fsa.analysis import (
     Defect,
     co_reachable,
@@ -51,6 +52,9 @@ __all__ = [
     "Document",
     "Layout",
     "Point",
+    "geometry",
+    "language",
+    "export",
     "StateId",
     "Symbol",
     "is_legal_symbol",

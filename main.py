@@ -31,8 +31,7 @@ if os.path.isdir(_SRC) and _SRC not in sys.path:
 import fsa
 import fsa.document
 from editor import EditorModel
-from fsa import Document, serialize
-from rendering import geometry
+from fsa import Document, geometry, serialize
 from rendering.animation import Animated, AnimatedPoint, Track, ease_in_out, ease_out_back
 from rendering.fonts import FontBook
 from rendering.renderer import Renderer, default_state_radius

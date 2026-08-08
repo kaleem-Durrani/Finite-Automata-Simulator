@@ -1,9 +1,10 @@
 """Path geometry for automaton diagrams.
 
-Pure functions over plain tuples. No pygame, no state, no drawing -- so this is
-unit-testable, and the SVG and TikZ exporters can share it with the on-screen
-renderer rather than reimplementing the same curves and getting different
-pictures.
+Pure functions over plain tuples. No pygame, no state, no drawing.
+
+It lives in the engine rather than beside the renderer because it is shared:
+the on-screen renderer and the SVG exporter draw the same diagram, and the only
+way to guarantee they agree is for them to compute it from the same code.
 
 Three things here were wrong in the previous renderer and are fixed:
 

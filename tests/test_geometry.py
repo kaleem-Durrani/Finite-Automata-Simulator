@@ -10,7 +10,7 @@ import math
 
 import pytest
 
-from rendering import geometry as g
+from fsa import geometry as g
 
 RADIUS = 30.0
 SOURCE = (200.0, 200.0)
