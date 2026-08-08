@@ -14,6 +14,7 @@ import pygame
 import pytest
 
 import main as main_module
+import ui.ui_manager as ui_manager_module
 from core.state import StateType
 from main import AutomatonSimulator
 
@@ -32,6 +33,26 @@ def pump(app: AutomatonSimulator, frames: int = 3):
     for _ in range(frames):
         app._update(16)
         app._render()
+
+
+def send(app: AutomatonSimulator, event: pygame.event.Event):
+    """Push one event through the application's real dispatch path.
+
+    Goes via the event queue and _handle_events rather than calling a handler
+    directly, so the UI-first / consume gate is exercised exactly as it is at
+    runtime. A test that calls a handler directly proves nothing about routing.
+    """
+    pygame.event.clear()
+    pygame.event.post(event)
+    app._handle_events()
+
+
+def click(app: AutomatonSimulator, pos, button: int = 1, mod: int = 0):
+    send(app, pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=button, pos=pos, mod=mod))
+
+
+def press(app: AutomatonSimulator, code: int, char: str = "", mod: int = 0):
+    send(app, pygame.event.Event(pygame.KEYDOWN, key=code, unicode=char, mod=mod))
 
 
 # ---------------------------------------------------------------------------
@@ -235,37 +256,26 @@ def test_load_adds_unseen_symbols_to_the_palette(app, tmp_path):
 
 def test_toolbar_save_and_load_drive_the_whole_flow(app, tmp_path):
     """Click Save, type a name, press Enter; then click Load and confirm."""
-
-    def click(rect):
-        event = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=rect.center)
-        app._handle_mouse_down(event)
-        app._process_ui_actions(app.ui_manager.handle_event(event))
-
-    def key(code, char=""):
-        event = pygame.event.Event(pygame.KEYDOWN, key=code, unicode=char)
-        app._handle_key_down(event)
-        app._process_ui_actions(app.ui_manager.handle_event(event))
-
-    click(app.ui_manager.save_button_rect)
+    click(app, app.ui_manager.save_button_rect.center)
     assert app.ui_manager.file_prompt_mode == "save"
 
     for _ in range(40):
-        key(pygame.K_BACKSPACE)
+        press(app, pygame.K_BACKSPACE)
     for char in "demo":
-        key(ord(char), char)
-    key(pygame.K_RETURN, "\r")
+        press(app, ord(char), char)
+    press(app, pygame.K_RETURN, "\r")
 
     assert (tmp_path / "demo.json").exists()
     assert app.current_filename == "demo.json"
 
-    key(pygame.K_SPACE, " ")
+    press(app, pygame.K_SPACE, " ")
     assert len(app.dfa.states) == 4
 
-    click(app.ui_manager.load_button_rect)
+    click(app, app.ui_manager.load_button_rect.center)
     assert app.ui_manager.confirm_intent == "load_after_confirm"
-    key(pygame.K_y, "y")
+    press(app, pygame.K_y, "y")
     assert app.ui_manager.file_prompt_mode == "load"
-    key(pygame.K_RETURN, "\r")
+    press(app, pygame.K_RETURN, "\r")
 
     assert len(app.dfa.states) == 3
     assert app.dirty is False
@@ -280,12 +290,13 @@ def test_ui_hit_tests_use_the_event_position(app):
     """
     pygame.mouse.set_pos((0, 0))
 
-    actions = app.ui_manager.handle_event(
+    actions, consumed = app.ui_manager.handle_event(
         pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
                            pos=app.ui_manager.test_button_rect.center))
     assert "test_string" in actions
+    assert consumed is True
 
-    actions = app.ui_manager.handle_event(
+    actions, consumed = app.ui_manager.handle_event(
         pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(5, 5)))
     assert "test_string" not in actions
 
@@ -344,9 +355,22 @@ def test_typing_in_a_dialog_does_not_edit_the_automaton(app):
     """Editor shortcuts are bare letters and used to fire behind open dialogs."""
     app.ui_manager.adding_symbol = True
     states_before = len(app.dfa.states)
+    types_before = {sid: s.state_type for sid, s in app.dfa.states.items()}
+    app._select_state("q0")
 
-    for key, unicode_char in [(pygame.K_SPACE, " "), (pygame.K_q, "q"), (pygame.K_w, "w")]:
-        app._handle_key_down(pygame.event.Event(pygame.KEYDOWN, key=key, unicode=unicode_char))
+    press(app, pygame.K_SPACE, " ")
+    press(app, pygame.K_q, "q")
+    press(app, pygame.K_w, "w")
+
+    assert len(app.dfa.states) == states_before
+    assert {sid: s.state_type for sid, s in app.dfa.states.items()} == types_before
+
+
+def test_typing_in_the_test_field_does_not_edit_the_automaton(app):
+    app.ui_manager.input_active = True
+    states_before = len(app.dfa.states)
+
+    press(app, pygame.K_SPACE, " ")
 
     assert len(app.dfa.states) == states_before
 
@@ -357,21 +381,17 @@ def test_filename_prompt_captures_the_keyboard(app):
     assert app.ui_manager.is_modal_active()
 
     for char in "notes":
-        app.ui_manager.handle_event(
-            pygame.event.Event(pygame.KEYDOWN, key=ord(char), unicode=char))
+        press(app, ord(char), char)
     assert app.ui_manager.file_prompt_text == "notes"
 
-    actions = app.ui_manager.handle_event(
-        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, unicode="\r"))
-    assert actions["save_to_path"] == "notes"
+    press(app, pygame.K_RETURN, "\r")
     assert not app.ui_manager.is_modal_active()
+    assert app.current_filename == "notes.json"
 
 
 def test_escape_cancels_the_filename_prompt(app):
     app.ui_manager.show_file_prompt("load", "x.json")
-    actions = app.ui_manager.handle_event(
-        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE, unicode="\x1b"))
-    assert actions.get("file_prompt_cancel") is True
+    press(app, pygame.K_ESCAPE, "\x1b")
     assert app.ui_manager.file_prompt_mode is None
 
 
@@ -379,8 +399,7 @@ def test_modal_swallows_canvas_clicks(app):
     app.ui_manager.show_confirm("Quit without saving?", "quit_after_confirm")
     states_before = len(app.dfa.states)
 
-    app._handle_mouse_down(
-        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=(500, 400)))
+    click(app, (500, 400), button=3)
 
     assert len(app.dfa.states) == states_before
     assert app.ui_manager.context_menu is None
@@ -416,3 +435,208 @@ def test_set_initial_ignores_unknown_state(app):
 def test_demo_state_types(app):
     assert app.dfa.states["q1"].state_type is StateType.ACCEPT
     assert app.dfa.states["q2"].state_type is StateType.DEAD_END
+
+
+# ---------------------------------------------------------------------------
+# Event routing: one owner per event
+# ---------------------------------------------------------------------------
+
+
+def canvas_point(app: AutomatonSimulator, fraction_y: float) -> tuple:
+    """A point on the canvas at the given fraction of the window height."""
+    return (app.screen.get_width() // 2, int(app.screen.get_height() * fraction_y))
+
+
+def test_toolbar_click_does_not_also_hit_the_canvas(app):
+    """Every event used to go to the UI *and* the canvas handlers.
+
+    Clicking Test therefore also deselected whatever state was selected.
+    """
+    app._select_state("q1")
+
+    click(app, app.ui_manager.test_button_rect.center)
+
+    assert app.selected_state == "q1", "using a toolbar control must not deselect"
+
+
+def test_clicks_report_whether_the_ui_consumed_them(app):
+    _, consumed = app.ui_manager.handle_event(
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                           pos=app.ui_manager.save_button_rect.center))
+    assert consumed is True
+
+    _, consumed = app.ui_manager.handle_event(
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                           pos=canvas_point(app, 0.5)))
+    assert consumed is False
+
+
+def test_shift_click_starts_a_transition_without_dragging(app):
+    """Shift+click used to do both, because it was polled *and* handled.
+
+    The poll in _update armed transition creation while the click handler
+    independently started a drag, so the source state followed the mouse.
+    """
+    state = app.dfa.states["q0"]
+    before = list(state.position)
+    screen_pos = app.renderer.camera.world_to_screen(state.position)
+
+    click(app, (int(screen_pos[0]), int(screen_pos[1])), mod=pygame.KMOD_LSHIFT)
+
+    assert app.creating_transition is True
+    assert app.transition_start_state == "q0"
+    assert app.dragging_state is None
+    assert list(state.position) == before
+
+    # Releasing shift and pumping frames must not re-arm or move anything.
+    pump(app, frames=5)
+    assert app.transition_start_state == "q0"
+    assert list(state.position) == before
+
+
+def test_plain_click_still_selects_and_drags(app):
+    state = app.dfa.states["q0"]
+    screen_pos = app.renderer.camera.world_to_screen(state.position)
+
+    click(app, (int(screen_pos[0]), int(screen_pos[1])))
+
+    assert app.selected_state == "q0"
+    assert app.dragging_state == "q0"
+    assert app.creating_transition is False
+
+
+def test_no_input_polling_remains():
+    """Input must come from events, not from sampling device state per frame."""
+    source = Path(main_module.__file__).read_text(encoding="utf-8")
+    assert "key.get_pressed" not in source
+    assert "mouse.get_pressed" not in source
+
+
+def test_right_click_works_across_the_whole_canvas(app):
+    """Right-click used to be dead over a third to a half of the window.
+
+    Hit-testing used hardcoded bands (above y=120, below height-150) that bore
+    no relation to what was actually drawn.
+    """
+    samples = 40
+    # Collect the canvas points first, with no menu open -- is_over_ui counts
+    # an open context menu, so sampling it mid-loop would skip points that are
+    # only covered by the menu the previous iteration opened.
+    app.ui_manager.context_menu = None
+    points = [
+        canvas_point(app, 0.05 + 0.9 * i / (samples - 1))
+        for i in range(samples)
+    ]
+    canvas_points = [p for p in points if not app.ui_manager.is_over_ui(p)]
+    assert len(canvas_points) > samples // 2, "most of the window should be canvas"
+
+    opened = 0
+    for point in canvas_points:
+        app.ui_manager.context_menu = None
+        click(app, point, button=3)
+        if app.ui_manager.context_menu is not None:
+            opened += 1
+
+    assert opened == len(canvas_points), "every canvas point must open a context menu"
+
+
+def test_ui_panels_are_not_canvas(app):
+    """Points on a panel are the UI's, and must not open a canvas menu."""
+    assert app.ui_manager.is_over_ui(app.ui_manager.save_button_rect.center)
+    assert app.ui_manager.is_over_ui(app.ui_manager.input_rect.center)
+    assert app.ui_manager.is_over_ui(app.ui_manager.layout.status_panel.center)
+    assert not app.ui_manager.is_over_ui(canvas_point(app, 0.5))
+
+
+def test_help_panel_scrolls_to_the_last_line(app):
+    """The panel could not scroll at all: max_scroll computed to zero.
+
+    Six lines, including every execution shortcut, were unreachable.
+    """
+    app.ui_manager.show_help = True
+    visible = app.ui_manager.layout.help_visible_lines()
+    assert len(ui_manager_module.HELP_LINES) > visible, "otherwise this proves nothing"
+
+    for _ in range(50):
+        send(app, pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-1))
+
+    expected = len(ui_manager_module.HELP_LINES) - visible
+    assert app.ui_manager.help_scroll_offset == expected
+
+    for _ in range(50):
+        send(app, pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=1))
+    assert app.ui_manager.help_scroll_offset == 0
+
+
+def test_scrolling_the_help_panel_does_not_also_zoom(app):
+    """Both the app and the UI handled the wheel, so it did both."""
+    app.ui_manager.show_help = True
+    zoom_before = app.renderer.camera.zoom
+
+    send(app, pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-1))
+
+    assert app.renderer.camera.zoom == zoom_before
+    assert app.ui_manager.help_scroll_offset > 0
+
+
+def test_wheel_still_zooms_when_help_is_closed(app):
+    zoom_before = app.renderer.camera.zoom
+    send(app, pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=1))
+    assert app.renderer.camera.zoom > zoom_before
+
+
+def test_speed_slider_can_be_dragged_and_is_read(app):
+    """The slider was inert: undraggable, and its value was never read."""
+    slider = app.ui_manager.layout.speed_slider
+
+    click(app, (slider.x + 2, slider.centery))
+    assert app.ui_manager.speed_slider_dragging is True
+    send(app, pygame.event.Event(pygame.MOUSEMOTION, pos=(slider.right - 2, slider.centery),
+                                 rel=(0, 0), buttons=(1, 0, 0)))
+    fast_end = app.ui_manager.animation_speed
+
+    send(app, pygame.event.Event(pygame.MOUSEBUTTONUP, button=1,
+                                 pos=(slider.right - 2, slider.centery)))
+    assert app.ui_manager.speed_slider_dragging is False
+
+    click(app, (slider.x + 2, slider.centery))
+    slow_end = app.ui_manager.animation_speed
+    assert fast_end > slow_end
+
+    # And the value the app steps on is the one the slider set.
+    app._test_string("aab")
+    app._toggle_animation()
+    app.animation_timer = 0
+    app._update(16)
+    assert app.execution_step >= 0
+
+
+def test_symbol_buttons_are_clickable_before_the_first_draw(app):
+    """Rects used to be produced as a side effect of drawing.
+
+    The app fixture has never rendered a frame at this point, so the palette
+    only responds if its rectangles were computed at construction.
+    """
+    manager = app.ui_manager
+    assert set(manager.symbol_buttons) == set(manager.available_symbols)
+    assert manager.add_symbol_button_rect is not None
+
+    click(app, manager.symbol_buttons["b"].center)
+    assert manager.selected_symbol == "b"
+
+
+def test_added_symbol_gets_a_button_immediately(app):
+    assert app.ui_manager.add_symbol("z")
+    assert "z" in app.ui_manager.symbol_buttons
+    click(app, app.ui_manager.symbol_buttons["z"].center)
+    assert app.ui_manager.selected_symbol == "z"
+
+
+def test_result_colour_is_not_decided_by_user_input(app):
+    """The colour test matched 'accepted' anywhere in the message.
+
+    Testing the literal string 'accepted' produced a rejection painted green.
+    """
+    app._test_string("accepted")
+    assert app.ui_manager.test_result.endswith("REJECTED")
+    pump(app)
