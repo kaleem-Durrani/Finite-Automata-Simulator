@@ -74,9 +74,9 @@ class AutomatonSimulator:
         self.execution_string = ""
         self.execution_path: List[str] = []
 
-        # Animation system
+        # Animation system. The step interval lives on the UI manager, next to
+        # the slider that sets it -- there is one owner, not two.
         self.animation_active = False
-        self.animation_speed = 1000  # ms per step
         self.animation_timer = 0
         self.animation_auto_advance = False
 
@@ -134,35 +134,39 @@ class AutomatonSimulator:
         sys.exit()
 
     def _handle_events(self):
-        """Process all pygame events."""
+        """
+        Process all pygame events.
+
+        Each event is offered to the UI first. If the UI consumed it -- a click
+        on a widget, a keypress into a text field, a wheel event over the open
+        help panel -- the canvas never sees it. Previously every event was given
+        to both, so clicking the Test button also deselected the state behind
+        it and scrolling the help panel also zoomed the camera.
+        """
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self._request_quit()
+                continue
 
-            elif event.type == pygame.VIDEORESIZE:
+            if event.type == pygame.VIDEORESIZE:
                 self._handle_resize(event.w, event.h)
+                continue
 
-            elif event.type == pygame.MOUSEBUTTONDOWN:
+            actions, consumed = self.ui_manager.handle_event(event)
+            self._process_ui_actions(actions)
+            if consumed:
+                continue
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
                 self._handle_mouse_down(event)
-
             elif event.type == pygame.MOUSEBUTTONUP:
                 self._handle_mouse_up(event)
-
             elif event.type == pygame.MOUSEMOTION:
                 self._handle_mouse_motion(event)
-
             elif event.type == pygame.MOUSEWHEEL:
                 self._handle_mouse_wheel(event)
-
             elif event.type == pygame.KEYDOWN:
                 self._handle_key_down(event)
-
-            elif event.type == pygame.KEYUP:
-                self._handle_key_up(event)
-
-            # Let UI manager handle events
-            ui_actions = self.ui_manager.handle_event(event)
-            self._process_ui_actions(ui_actions)
 
     def _handle_resize(self, width: int, height: int):
         """Handle window resize events."""
@@ -171,13 +175,9 @@ class AutomatonSimulator:
         self.ui_manager.update_screen_size(width, height)
 
     def _handle_mouse_down(self, event):
-        """Handle mouse button down events."""
-        # A modal dialog owns the screen; clicks must not reach the canvas.
-        if self.ui_manager.is_modal_active():
-            return
-
+        """Handle mouse button down events that the UI did not consume."""
         if event.button == 1:  # Left click
-            self._handle_left_click(event.pos)
+            self._handle_left_click(event.pos, bool(event.mod & pygame.KMOD_SHIFT))
         elif event.button == 2:  # Middle click
             self._start_panning(event.pos)
         elif event.button == 3:  # Right click
@@ -201,24 +201,13 @@ class AutomatonSimulator:
         self._update_hover_states(event.pos)
 
     def _handle_mouse_wheel(self, event):
-        """Handle mouse wheel events."""
-        # Check if help panel is open and mouse is over it
-        if self.ui_manager.show_help:
-            mouse_pos = pygame.mouse.get_pos()
-            panel_width = 400
-            panel_height = 500
-            panel_x = (self.screen.get_width() - panel_width) // 2
-            panel_y = (self.screen.get_height() - panel_height) // 2
-            panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
+        """Zoom, or bend the transition being drawn.
 
-            if panel_rect.collidepoint(mouse_pos):
-                # Scroll help panel
-                self.ui_manager.help_scroll_offset -= event.y * 3
-                self.ui_manager.help_scroll_offset = max(0, self.ui_manager.help_scroll_offset)
-                return
-
+        Help-panel scrolling is the UI's job; if it handled the event this is
+        never reached. Both used to run, so scrolling the panel also zoomed the
+        camera underneath it.
+        """
         if not self.creating_transition:
-            # Normal zoom
             zoom_factor = 1.1 if event.y > 0 else 0.9
             self.renderer.camera.zoom_at(pygame.mouse.get_pos(), zoom_factor)
         else:
@@ -227,12 +216,7 @@ class AutomatonSimulator:
             self.transition_arc_offset = max(-100, min(100, self.transition_arc_offset))
 
     def _handle_key_down(self, event):
-        """Handle key down events."""
-        # Editor shortcuts are bare letters, so they must not fire while a text
-        # field or a dialog has the keyboard. Without this, typing into the
-        # Add Symbol dialog also edits the automaton behind it.
-        if self.ui_manager.is_keyboard_captured():
-            return
+        """Handle key down events that the UI did not consume."""
 
         # Handle system keys first (these take priority)
         if event.key == pygame.K_SPACE:
@@ -337,54 +321,42 @@ class AutomatonSimulator:
         # Use the UI manager's add_symbol method which has proper validation
         return self.ui_manager.add_symbol(symbol)
 
-    def _handle_left_click(self, pos: Tuple[int, int]):
-        """Handle left mouse click."""
-        world_pos = self.renderer.camera.screen_to_world(pos)
+    def _handle_left_click(self, pos: Tuple[int, int], shift: bool = False):
+        """
+        Handle a left click on the canvas.
 
-        # Check if clicking on a state
+        Exactly one of {complete a transition, start a transition, select and
+        drag, deselect} happens. Shift is read from the event's modifier state
+        rather than polled from the keyboard each frame, which is what used to
+        make shift+click both start a transition *and* drag the source state.
+        """
+        world_pos = self.renderer.camera.screen_to_world(pos)
         clicked_state = self._get_state_at_position(world_pos)
 
         if self.creating_transition:
             if clicked_state:
-                # Complete transition
                 self._complete_transition(clicked_state)
             else:
-                # Cancel transition
                 self._cancel_transition()
+                self._show_message("Transition cancelled")
+        elif shift and clicked_state:
+            self._select_state(clicked_state)
+            self._start_transition(clicked_state)
+        elif clicked_state:
+            self._select_state(clicked_state)
+            self._start_dragging(clicked_state, pos)
         else:
-            if clicked_state:
-                # Select and start dragging
-                self._select_state(clicked_state)
-                self._start_dragging(clicked_state, pos)
-            else:
-                # Deselect all
-                self._deselect_all()
+            self._deselect_all()
 
     def _handle_right_click(self, pos: Tuple[int, int]):
-        """Handle right mouse click."""
-        # Check if click is on UI elements first
-        if self._is_click_on_ui(pos):
-            return
-
+        """Handle right mouse click on the canvas."""
         world_pos = self.renderer.camera.screen_to_world(pos)
         clicked_state = self._get_state_at_position(world_pos)
 
         if clicked_state:
-            self._show_message(f"Right-clicked state: {clicked_state}")
             self._show_state_context_menu(pos, clicked_state)
         else:
-            self._show_message("Right-clicked empty space")
             self._show_general_context_menu(pos)
-
-    def _is_click_on_ui(self, pos: Tuple[int, int]) -> bool:
-        """Check if click is on UI elements."""
-        # Check if click is on toolbar area
-        if pos[1] < 120:  # Toolbar and symbol area
-            return True
-        # Check if click is on input area
-        if pos[1] > self.screen.get_height() - 150:  # Input area
-            return True
-        return False
 
     def _handle_left_release(self, _pos: Tuple[int, int]):
         """Handle left mouse button release."""
@@ -751,34 +723,19 @@ class AutomatonSimulator:
         # Update message system
         self._update_message()
 
-        # Handle animation auto-advance
+        # Handle animation auto-advance. The interval is owned by the UI, which
+        # is where the slider that sets it lives; keeping a second copy here
+        # meant dragging the slider changed a value nothing ever read.
         if (self.animation_active and self.animation_auto_advance and
             self.execution_active):
             current_time = pygame.time.get_ticks()
-            if current_time - self.animation_timer >= self.animation_speed:
+            if current_time - self.animation_timer >= self.ui_manager.animation_speed:
                 if self.execution_step < len(self.execution_path) - 1:
                     self.execution_step += 1
                     self.animation_timer = current_time
                 else:
                     # Animation finished
                     self.animation_auto_advance = False
-
-        # Handle shift+click for transition creation
-        if self.ui_manager.is_modal_active():
-            return
-
-        keys = pygame.key.get_pressed()
-        mouse_buttons = pygame.mouse.get_pressed()
-
-        if keys[pygame.K_LSHIFT] and mouse_buttons[0]:
-            if not self.creating_transition:
-                # Start creating transition
-                mouse_pos = pygame.mouse.get_pos()
-                world_pos = self.renderer.camera.screen_to_world(mouse_pos)
-                clicked_state = self._get_state_at_position(world_pos)
-
-                if clicked_state:
-                    self._start_transition(clicked_state)
 
     def _start_transition(self, from_state: str):
         """Start creating a transition from the given state."""
@@ -893,19 +850,16 @@ class AutomatonSimulator:
             self.renderer.draw_state(state, is_executing)
 
         # Draw UI
-        self.ui_manager.draw(self.dfa, getattr(self.ui_manager, 'test_result', ''))
-
-        # Update animation state in UI manager
-        self.ui_manager._animation_active = self.animation_active
+        self.ui_manager.draw(self.dfa, self.ui_manager.test_result, self.animation_active)
 
         # Draw execution status
+        self.ui_manager.draw_execution_status(
+            self.execution_active,
+            self.execution_step,
+            self.execution_string,
+            self.execution_path
+        )
         if self.execution_active:
-            self.ui_manager.draw_execution_status(
-                self.execution_active,
-                self.execution_step,
-                self.execution_string,
-                self.execution_path
-            )
 
             # Draw string visualization
             self.ui_manager.draw_string_visualization(self.execution_string, self.execution_step)

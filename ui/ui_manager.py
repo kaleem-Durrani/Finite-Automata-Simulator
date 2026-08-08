@@ -11,6 +11,57 @@ from typing import Any, Dict, List, Optional, Tuple
 import pygame
 
 from core.dfa import DFA
+from ui.layout_spec import (
+    HELP_LINE_HEIGHT,
+    HELP_TITLE_HEIGHT,
+    SPEED_MAX_MS,
+    SPEED_MIN_MS,
+    LayoutSpec,
+)
+
+# The help text lives at module level so that the code which scrolls it and the
+# code which draws it agree on how many lines there are. They used to be two
+# independent guesses, and they disagreed badly enough that the maximum scroll
+# offset came out as zero.
+HELP_LINES = [
+    "Mouse Controls:",
+    "- Left Click: Select states/UI",
+    "- Shift+Click: Start transition",
+    "- Right Click: Context menu",
+    "- Middle Click+Drag: Pan view",
+    "- Scroll Wheel: Zoom",
+    "",
+    "Keyboard Shortcuts:",
+    "- Space: Add state at center",
+    "- Delete: Remove selected state",
+    "- Q: Toggle accept state",
+    "- W: Toggle dead end state",
+    "- R: Reset camera view",
+    "",
+    "Creating Transitions:",
+    "- Select symbol from toolbar",
+    "- Shift+click source state",
+    "- Click target state",
+    "",
+    "Testing Strings:",
+    "- Enter string in input field",
+    "- Click Test or press Enter",
+    "",
+    "Execution Visualization:",
+    "- N: Next step",
+    "- P: Previous step",
+    "- TAB: Toggle animation",
+    "- ESC: Stop visualization",
+    "",
+    "File Operations:",
+    "- Save/Load buttons in toolbar",
+    "- Filenames are relative to",
+    "  the project folder",
+]
+
+
+CONTEXT_MENU_WIDTH = 150
+CONTEXT_MENU_ITEM_HEIGHT = 25
 
 
 @dataclass
@@ -100,28 +151,60 @@ class UIManager:
         # Animation controls
         self.animation_speed = 1000  # ms per step
         self.speed_slider_dragging = False
-        
+
+        # Whether the execution panel is on screen; it is only a hit target
+        # while it is actually drawn.
+        self.execution_panel_visible = False
+
     def _setup_ui_elements(self):
-        """Initialize UI element positions and sizes."""
-        # Main input and test area
-        self.input_rect = pygame.Rect(20, self.screen_height - 100, 200, 30)
-        self.test_button_rect = pygame.Rect(230, self.screen_height - 100, 80, 30)
-        
-        # Toolbar buttons
-        self.help_button_rect = pygame.Rect(self.screen_width - 100, 20, 80, 30)
-        self.save_button_rect = pygame.Rect(self.screen_width - 190, 20, 80, 30)
-        self.load_button_rect = pygame.Rect(self.screen_width - 280, 20, 80, 30)
-        
-        # Symbol buttons (will be populated dynamically)
-        self.symbol_buttons = {}
-        
-        # Add symbol button
-        self.add_symbol_button_rect = None  # Will be set dynamically
-        
+        """Recompute every UI rectangle for the current window size."""
+        self.layout = LayoutSpec.for_size(self.screen_width, self.screen_height)
+        self._recompute_symbol_buttons()
+
+    def _recompute_symbol_buttons(self):
+        """
+        Position the symbol palette.
+
+        Computed here rather than while drawing, so that a button can be
+        clicked on the first frame it exists instead of only after it has been
+        painted once.
+        """
+        self.symbol_buttons = {
+            symbol: self.layout.symbol_button(index)
+            for index, symbol in enumerate(self.available_symbols)
+        }
+        self.add_symbol_button_rect = self.layout.symbol_button(len(self.available_symbols))
+
+    # Named rectangles are read straight from the layout so that drawing and
+    # hit-testing cannot drift apart.
+    @property
+    def input_rect(self) -> pygame.Rect:
+        return self.layout.input_field
+
+    @property
+    def test_button_rect(self) -> pygame.Rect:
+        return self.layout.test_button
+
+    @property
+    def help_button_rect(self) -> pygame.Rect:
+        return self.layout.help_button
+
+    @property
+    def save_button_rect(self) -> pygame.Rect:
+        return self.layout.save_button
+
+    @property
+    def load_button_rect(self) -> pygame.Rect:
+        return self.layout.load_button
+
+    @property
+    def speed_slider_rect(self) -> pygame.Rect:
+        return self.layout.speed_slider
+
     def update_screen_size(self, width: int, height: int):
         """
         Update UI element positions when screen size changes.
-        
+
         Args:
             width: New screen width
             height: New screen height
@@ -130,140 +213,214 @@ class UIManager:
         self.screen_height = height
         self._setup_ui_elements()
     
-    def handle_event(self, event: pygame.event.Event) -> Dict[str, Any]:
+    def handle_event(self, event: pygame.event.Event) -> Tuple[Dict[str, Any], bool]:
         """
-        Handle UI events and return actions for the main application.
-        
+        Handle a UI event.
+
         Args:
             event: Pygame event to process
-            
+
         Returns:
-            Dictionary of actions to be handled by the main application
+            (actions, consumed). `consumed` is True when this event belonged to
+            the UI and must not also be interpreted as a click on the canvas.
+            The application layer runs its own handlers only when it is False,
+            which is what stops one click from doing two contradictory things.
         """
-        actions: Dict[str, Any] = {}
-        
         if event.type == pygame.MOUSEBUTTONDOWN:
-            actions.update(self._handle_mouse_down(event))
-        elif event.type == pygame.KEYDOWN:
-            actions.update(self._handle_key_down(event))
-        elif event.type == pygame.KEYUP:
-            actions.update(self._handle_key_up(event))
-        elif event.type == pygame.MOUSEWHEEL:
-            actions.update(self._handle_mouse_wheel(event))
-        
-        return actions
+            return self._handle_mouse_down(event)
+        if event.type == pygame.MOUSEBUTTONUP:
+            return self._handle_mouse_up(event)
+        if event.type == pygame.MOUSEMOTION:
+            return self._handle_mouse_motion(event)
+        if event.type == pygame.KEYDOWN:
+            return self._handle_key_down(event), self.is_keyboard_captured()
+        if event.type == pygame.KEYUP:
+            return self._handle_key_up(event), False
+        if event.type == pygame.MOUSEWHEEL:
+            return self._handle_mouse_wheel(event)
 
-    def _handle_mouse_wheel(self, event) -> Dict[str, Any]:
-        """Handle mouse wheel events."""
-        actions: Dict[str, Any] = {}
+        return {}, False
 
-        # Check if scrolling in help panel
-        if self.show_help:
-            # Scroll help panel
-            self.help_scroll_offset -= event.y * 3  # Scroll speed
+    # ------------------------------------------------------------------
+    # Hit testing
+    # ------------------------------------------------------------------
 
-            # Calculate max scroll based on content
-            help_lines_count = 20  # Approximate number of help lines
-            visible_lines = 25  # Approximate visible lines
-            max_scroll = max(0, help_lines_count - visible_lines)
+    def opaque_panels(self) -> List[pygame.Rect]:
+        """The UI regions currently painted over the canvas."""
+        return self.layout.opaque_panels(
+            execution_active=self.execution_panel_visible,
+            help_open=self.show_help,
+        )
 
-            # Clamp scroll offset
-            self.help_scroll_offset = max(0, min(max_scroll, self.help_scroll_offset))
-
-        return actions
-    
-    def _handle_mouse_down(self, event) -> Dict[str, Any]:
-        """Handle mouse button down events."""
-        actions: Dict[str, Any] = {}
-
-        # A modal dialog swallows clicks; the widgets behind it are not live.
+    def is_over_ui(self, pos: Tuple[int, int]) -> bool:
+        """Whether a point lands on a UI panel rather than the canvas."""
         if self.is_modal_active():
-            return actions
+            return True
+        if self.context_menu and self.context_menu.visible:
+            if self._context_menu_rect().collidepoint(pos):
+                return True
+        return any(panel.collidepoint(pos) for panel in self.opaque_panels())
 
-        # Only handle left clicks in UI
-        if event.button != 1:
-            return actions
+    def _widget_hits(self):
+        """
+        Interactive widgets, topmost first.
 
+        Returned as (rect, handler) so the click loop can stop at the first
+        match. Testing every widget instead meant a single click could fire two
+        conflicting actions.
+        """
+        hits = [
+            (self.layout.help_button, self._on_help_button),
+            (self.layout.save_button, self._on_save_button),
+            (self.layout.load_button, self._on_load_button),
+            (self.layout.test_button, self._on_test_button),
+            (self.layout.input_field, self._on_input_field),
+            (self.layout.speed_slider, self._on_speed_slider),
+            (self.add_symbol_button_rect, self._on_add_symbol_button),
+        ]
+        for symbol, rect in self.symbol_buttons.items():
+            hits.append((rect, self._symbol_handler(symbol)))
+        return [(rect, handler) for rect, handler in hits if rect is not None]
+
+    # -- widget handlers ------------------------------------------------
+
+    def _on_help_button(self, _pos) -> Dict[str, Any]:
+        self.show_help = not self.show_help
+        self.help_scroll_offset = 0
+        return {'toggle_help': True}
+
+    def _on_save_button(self, _pos) -> Dict[str, Any]:
+        return {'save_automaton': True}
+
+    def _on_load_button(self, _pos) -> Dict[str, Any]:
+        return {'load_automaton': True}
+
+    def _on_test_button(self, _pos) -> Dict[str, Any]:
+        return {'test_string': self.input_text}
+
+    def _on_input_field(self, _pos) -> Dict[str, Any]:
+        self.input_active = True
+        return {'input_focus': True}
+
+    def _on_add_symbol_button(self, _pos) -> Dict[str, Any]:
+        self.adding_symbol = True
+        self.new_symbol_input = ""
+        return {'add_symbol': True}
+
+    def _symbol_handler(self, symbol: str):
+        def handler(_pos) -> Dict[str, Any]:
+            self.selected_symbol = symbol
+            return {'symbol_selected': symbol,
+                    'show_message': f"Selected symbol: {symbol}"}
+        return handler
+
+    def _on_speed_slider(self, pos) -> Dict[str, Any]:
+        self.speed_slider_dragging = True
+        return self._set_speed_from_x(pos[0])
+
+    def _set_speed_from_x(self, x: int) -> Dict[str, Any]:
+        """Map an x coordinate on the slider to an animation speed."""
+        slider = self.layout.speed_slider
+        ratio = (x - slider.x) / slider.width
+        ratio = max(0.0, min(1.0, ratio))
+        self.animation_speed = int(
+            SPEED_MIN_MS + ratio * (SPEED_MAX_MS - SPEED_MIN_MS))
+        return {'speed_changed': self.animation_speed}
+
+    # ------------------------------------------------------------------
+    # Mouse
+    # ------------------------------------------------------------------
+
+    def _handle_mouse_down(self, event) -> Tuple[Dict[str, Any], bool]:
+        """Route a mouse press to exactly one owner, topmost first."""
+        actions: Dict[str, Any] = {}
         # Hit-test against where the click happened, not where the cursor is
         # now. Those differ whenever the mouse moves between the event being
         # queued and the queue being drained, which loses clicks and lets a
         # click register against whatever the cursor has since moved over.
-        mouse_pos = event.pos
+        pos = event.pos
 
-        # Check input field
-        if self.input_rect.collidepoint(mouse_pos):
-            self.input_active = True
-            actions['input_focus'] = True
-        else:
-            self.input_active = False
-            
-        # Check test button
-        if self.test_button_rect.collidepoint(mouse_pos):
-            actions['test_string'] = self.input_text
-            
-        # Check toolbar buttons
-        if self.help_button_rect.collidepoint(mouse_pos):
-            self.show_help = not self.show_help
-            actions['toggle_help'] = True
-            
-        if self.save_button_rect.collidepoint(mouse_pos):
-            actions['save_automaton'] = True
-            
-        if self.load_button_rect.collidepoint(mouse_pos):
-            actions['load_automaton'] = True
-        
-        # Check symbol buttons
-        for symbol, button_rect in self.symbol_buttons.items():
-            if button_rect.collidepoint(mouse_pos):
-                self.selected_symbol = symbol
-                actions['symbol_selected'] = symbol
-                actions['show_message'] = f"Selected symbol: {symbol}"
-                break
-        
-        # Check add symbol button
-        if (self.add_symbol_button_rect and
-            self.add_symbol_button_rect.collidepoint(mouse_pos)):
-            self.adding_symbol = True
-            self.new_symbol_input = ""
-            actions['add_symbol'] = True
+        # A modal dialog owns everything beneath it.
+        if self.is_modal_active():
+            return self._handle_modal_click(pos), True
 
-        # Check symbol dialog buttons
+        # The add-symbol dialog is modal too, but has its own buttons.
         if self.adding_symbol:
-            if hasattr(self, 'symbol_dialog_cancel_rect') and self.symbol_dialog_cancel_rect.collidepoint(mouse_pos):
-                self.adding_symbol = False
-                self.new_symbol_input = ""
-                actions['symbol_dialog_cancel'] = True
-            elif hasattr(self, 'symbol_dialog_add_rect') and self.symbol_dialog_add_rect.collidepoint(mouse_pos):
-                if self.new_symbol_input:
-                    actions['symbol_add'] = self.new_symbol_input
-                    self.adding_symbol = False
-                    self.new_symbol_input = ""
+            return self._handle_symbol_dialog_click(pos), True
 
-        # Check speed slider
-        if hasattr(self, 'speed_slider_rect') and self.speed_slider_rect.collidepoint(mouse_pos):
-            self.speed_slider_dragging = True
-            # Calculate new speed based on mouse position
-            relative_x = mouse_pos[0] - self.speed_slider_rect.x
-            ratio = relative_x / self.speed_slider_rect.width
-            ratio = max(0, min(1, ratio))
-
-            min_speed, max_speed = 500, 3000
-            self.animation_speed = int(min_speed + ratio * (max_speed - min_speed))
-            actions['speed_changed'] = self.animation_speed
-        
-        # Check context menu
+        # The context menu is above every other widget, and any click while it
+        # is open belongs to it -- either choosing an item or dismissing it.
         if self.context_menu and self.context_menu.visible:
-            menu_action = self._handle_context_menu_click(mouse_pos)
+            menu_action = self._handle_context_menu_click(pos)
+            self.context_menu = None
             if menu_action:
                 actions['context_menu_action'] = menu_action
-                self.context_menu = None
-                return actions  # Return early to prevent other actions
-            else:
-                # Click outside menu - close it
-                self.context_menu = None
-                return actions  # Return early to prevent other actions
-                
+            return actions, True
+
+        if event.button != 1:
+            # Right and middle clicks belong to the canvas unless they land on
+            # a panel.
+            return actions, self.is_over_ui(pos)
+
+        for rect, handler in self._widget_hits():
+            if rect.collidepoint(pos):
+                self.input_active = rect is self.layout.input_field
+                return handler(pos), True
+
+        # Not a widget: clicking anywhere else drops text focus.
+        self.input_active = False
+
+        # A click on a panel with no widget under it is still the UI's.
+        return actions, self.is_over_ui(pos)
+
+    def _handle_mouse_up(self, event) -> Tuple[Dict[str, Any], bool]:
+        """Release the speed slider."""
+        if event.button == 1 and self.speed_slider_dragging:
+            self.speed_slider_dragging = False
+            return {}, True
+        return {}, False
+
+    def _handle_mouse_motion(self, event) -> Tuple[Dict[str, Any], bool]:
+        """Drag the speed slider."""
+        if self.speed_slider_dragging:
+            return self._set_speed_from_x(event.pos[0]), True
+        return {}, False
+
+    def _handle_modal_click(self, pos) -> Dict[str, Any]:
+        """Clicks while a modal dialog is open are swallowed."""
+        del pos
+        return {}
+
+    def _handle_symbol_dialog_click(self, pos) -> Dict[str, Any]:
+        """Handle the add-symbol dialog's own buttons."""
+        actions: Dict[str, Any] = {}
+        cancel, add = self._symbol_dialog_buttons()
+
+        if cancel.collidepoint(pos):
+            self.adding_symbol = False
+            self.new_symbol_input = ""
+            actions['symbol_dialog_cancel'] = True
+        elif add.collidepoint(pos) and self.new_symbol_input:
+            actions['symbol_add'] = self.new_symbol_input
+            self.adding_symbol = False
+            self.new_symbol_input = ""
+
         return actions
+
+    def _handle_mouse_wheel(self, event) -> Tuple[Dict[str, Any], bool]:
+        """Scroll the help panel. The canvas zooms only when this declines."""
+        if not self.show_help:
+            return {}, False
+
+        # Scroll bounds come from the same constants the drawing code uses.
+        # They used to be independent guesses that disagreed with the content,
+        # producing a maximum scroll of zero -- so the panel could not scroll at
+        # all and its last six lines, including every execution shortcut, were
+        # unreachable.
+        max_scroll = max(0, len(HELP_LINES) - self.layout.help_visible_lines())
+        self.help_scroll_offset -= event.y * 3
+        self.help_scroll_offset = max(0, min(max_scroll, self.help_scroll_offset))
+        return {}, True
     
     def is_keyboard_captured(self) -> bool:
         """
@@ -319,6 +476,7 @@ class UIManager:
                 self.available_symbols.append(symbol)
         if self.selected_symbol not in self.available_symbols and self.available_symbols:
             self.selected_symbol = self.available_symbols[0]
+        self._recompute_symbol_buttons()
 
     def _handle_file_prompt_key(self, event) -> Dict[str, Any]:
         """Handle keys while the filename prompt is open."""
@@ -428,14 +586,18 @@ class UIManager:
                     if self.input_text:
                         self.input_text = self.input_text[:-1]
 
-    def draw(self, dfa: DFA, test_result: str = ""):
+    def draw(self, dfa: DFA, test_result: str = "", animation_active: bool = False):
         """
         Draw all UI elements.
 
         Args:
             dfa: The current DFA for displaying information
             test_result: Result of the last string test
+            animation_active: Whether playback is running. Passed in rather than
+                pushed onto the manager after draw() has already run, which made
+                the indicator show the previous frame's state.
         """
+        self._animation_active = animation_active
         self._draw_toolbar()
         self._draw_input_area(test_result)
         self._draw_alphabet_selector(dfa)
@@ -522,7 +684,7 @@ class UIManager:
 
     def _draw_toolbar(self):
         """Draw the main toolbar at the top of the screen."""
-        toolbar_rect = pygame.Rect(0, 0, self.screen_width, 50)
+        toolbar_rect = self.layout.toolbar
         pygame.draw.rect(self.screen, self.colors['ui_bg'], toolbar_rect)
         pygame.draw.rect(self.screen, self.colors['ui_border'], toolbar_rect, 2)
 
@@ -555,6 +717,10 @@ class UIManager:
 
     def _draw_input_area(self, test_result: str):
         """Draw the input area for testing strings."""
+        panel = self.layout.input_panel
+        pygame.draw.rect(self.screen, self.colors['ui_bg'], panel)
+        pygame.draw.rect(self.screen, self.colors['ui_border'], panel, 2)
+
         # Input field
         input_color = self.colors['input_active'] if self.input_active else self.colors['input_inactive']
         pygame.draw.rect(self.screen, input_color, self.input_rect)
@@ -586,37 +752,36 @@ class UIManager:
 
         # Label
         label_text = self.font_medium.render("Test String:", True, self.colors['text'])
-        self.screen.blit(label_text, (20, self.screen_height - 130))
+        self.screen.blit(label_text, (panel.x + 10, panel.y + 12))
 
         # Test result
         if test_result:
-            result_color = self.colors['success'] if "accepted" in test_result.lower() else self.colors['error']
-            result_text = self.font_medium.render(test_result, True, result_color)
-            self.screen.blit(result_text, (320, self.screen_height - 95))
+            # Keyed on the end of the message, not a substring search. Matching
+            # "accepted" anywhere used to colour a rejection green whenever the
+            # word appeared in the user's own input.
+            result_color = (self.colors['success'] if test_result.endswith("ACCEPTED")
+                            else self.colors['error'])
+            result_text = self.font_small.render(test_result, True, result_color)
+            self.screen.blit(result_text, (self.test_button_rect.right + 15,
+                                           self.input_rect.centery - 7))
 
     def _draw_alphabet_selector(self, _dfa: DFA):
-        """Draw the alphabet selector with available symbols."""
-        # Clear previous button rects
-        self.symbol_buttons.clear()
+        """Draw the alphabet selector with available symbols.
+
+        Reads the rectangles computed in _recompute_symbol_buttons rather than
+        producing them as a side effect of drawing.
+        """
+        panel = self.layout.symbol_panel
+        pygame.draw.rect(self.screen, self.colors['ui_bg'], panel)
+        pygame.draw.rect(self.screen, self.colors['ui_border'], panel, 2)
 
         # Title
         title_text = self.font_medium.render("Transition Symbols:", True, self.colors['text'])
-        self.screen.blit(title_text, (20, 60))
-
-        # Draw symbol buttons
-        start_x = 20
-        start_y = 85
-        button_width = 40
-        button_height = 30
-        spacing = 5
+        self.screen.blit(title_text, (self.layout.symbol_row_origin[0], panel.y + 8))
 
         mouse_pos = pygame.mouse.get_pos()
 
-        for i, symbol in enumerate(self.available_symbols):
-            button_x = start_x + i * (button_width + spacing)
-            button_rect = pygame.Rect(button_x, start_y, button_width, button_height)
-            self.symbol_buttons[symbol] = button_rect
-
+        for symbol, button_rect in self.symbol_buttons.items():
             # Button color based on selection and hover
             if symbol == self.selected_symbol:
                 button_color = self.colors['button_active']
@@ -633,10 +798,6 @@ class UIManager:
             symbol_text_rect = symbol_text.get_rect(center=button_rect.center)
             self.screen.blit(symbol_text, symbol_text_rect)
 
-        # Add symbol button
-        add_button_x = start_x + len(self.available_symbols) * (button_width + spacing)
-        self.add_symbol_button_rect = pygame.Rect(add_button_x, start_y, button_width, button_height)
-
         add_button_color = (self.colors['button_hover'] if
                            self.add_symbol_button_rect.collidepoint(mouse_pos) else
                            self.colors['button_normal'])
@@ -650,13 +811,12 @@ class UIManager:
 
     def _draw_status_info(self, dfa: DFA):
         """Draw status information about the current automaton."""
-        info_x = self.screen_width - 300
-        info_y = 60
-
-        # Background panel
-        panel_rect = pygame.Rect(info_x - 10, info_y - 10, 290, 100)
+        panel_rect = self.layout.status_panel
         pygame.draw.rect(self.screen, self.colors['ui_bg'], panel_rect)
         pygame.draw.rect(self.screen, self.colors['ui_border'], panel_rect, 2)
+
+        info_x = panel_rect.x + 10
+        info_y = panel_rect.y + 10
 
         # Status information
         status_lines = [
@@ -682,24 +842,22 @@ class UIManager:
         status_surface = self.font_small.render(status_text, True, status_color)
         self.screen.blit(status_surface, (x, y))
 
-        # Speed slider
-        slider_y = y + 20
-        slider_width = 120
-        slider_height = 15
-        slider_rect = pygame.Rect(x, slider_y, slider_width, slider_height)
+        # Speed slider. The rectangle comes from the layout so that the handle
+        # can be grabbed before the panel has been drawn once.
+        slider_rect = self.layout.speed_slider
+        slider_width = slider_rect.width
+        slider_y = slider_rect.y
 
         # Draw slider background
         pygame.draw.rect(self.screen, self.colors['ui_border'], slider_rect)
         pygame.draw.rect(self.screen, self.colors['input_inactive'], slider_rect.inflate(-2, -2))
 
-        # Calculate slider position (500ms to 3000ms range)
-        min_speed, max_speed = 500, 3000
-        speed_ratio = (self.animation_speed - min_speed) / (max_speed - min_speed)
+        speed_ratio = (self.animation_speed - SPEED_MIN_MS) / (SPEED_MAX_MS - SPEED_MIN_MS)
         speed_ratio = max(0, min(1, speed_ratio))
 
         # Draw slider handle
-        handle_x = x + int(speed_ratio * (slider_width - 8))
-        handle_rect = pygame.Rect(handle_x, slider_y - 1, 8, slider_height + 2)
+        handle_x = slider_rect.x + int(speed_ratio * (slider_width - 8))
+        handle_rect = pygame.Rect(handle_x, slider_y - 1, 8, slider_rect.height + 2)
         pygame.draw.rect(self.screen, self.colors['button_normal'], handle_rect)
         pygame.draw.rect(self.screen, self.colors['ui_border'], handle_rect, 1)
 
@@ -708,58 +866,15 @@ class UIManager:
         speed_surface = self.font_small.render(speed_label, True, self.colors['text'])
         self.screen.blit(speed_surface, (x, slider_y + 20))
 
-        # Store slider rect for mouse handling
-        self.speed_slider_rect = slider_rect
-
-    def draw_animation_controls(self, animation_active: bool):
-        """Draw animation status and speed controls."""
-        # Position below the status info
-        control_x = self.screen_width - 290
-        control_y = 180
-
-        # Animation status
-        status_text = "Animation: ON" if animation_active else "Animation: OFF"
-        status_color = self.colors['success'] if animation_active else self.colors['error']
-        status_surface = self.font_small.render(status_text, True, status_color)
-        self.screen.blit(status_surface, (control_x, control_y))
-
-        # Speed slider
-        slider_y = control_y + 25
-        slider_width = 150
-        slider_height = 20
-        slider_rect = pygame.Rect(control_x, slider_y, slider_width, slider_height)
-
-        # Draw slider background
-        pygame.draw.rect(self.screen, self.colors['ui_border'], slider_rect)
-        pygame.draw.rect(self.screen, self.colors['input_inactive'], slider_rect.inflate(-2, -2))
-
-        # Calculate slider position (500ms to 3000ms range)
-        min_speed, max_speed = 500, 3000
-        speed_ratio = (self.animation_speed - min_speed) / (max_speed - min_speed)
-        speed_ratio = max(0, min(1, speed_ratio))
-
-        # Draw slider handle
-        handle_x = control_x + int(speed_ratio * (slider_width - 10))
-        handle_rect = pygame.Rect(handle_x, slider_y - 2, 10, slider_height + 4)
-        pygame.draw.rect(self.screen, self.colors['button_normal'], handle_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], handle_rect, 2)
-
-        # Speed label
-        speed_label = f"Speed: {self.animation_speed}ms"
-        speed_surface = self.font_small.render(speed_label, True, self.colors['text'])
-        self.screen.blit(speed_surface, (control_x, slider_y + 25))
-
-        return slider_rect  # Return for mouse handling
-
     def draw_string_visualization(self, test_string: str, current_step: int):
         """Draw the test string with current position highlighted."""
         if not test_string:
             return
 
-        # Position at bottom of screen
-        string_y = self.screen_height - 80
+        strip = self.layout.string_strip
+        string_y = strip.y
         char_width = 30
-        char_height = 40
+        char_height = strip.height
 
         # Calculate total width needed
         total_width = len(test_string) * char_width
@@ -818,110 +933,52 @@ class UIManager:
             self.screen.blit(char_surface, char_text_rect)
 
     def _draw_help_panel(self):
-        """Draw the help panel with scrollable content."""
-        panel_width = 400
-        panel_height = 500
-        panel_x = (self.screen_width - panel_width) // 2
-        panel_y = (self.screen_height - panel_height) // 2
+        """Draw the help panel with scrollable content.
 
-        # Background
-        panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
+        Both the geometry and the line count come from the layout and from
+        HELP_LINES, which is also what the scroll handler reads. They used to be
+        independent constants that disagreed.
+        """
+        panel_rect = self.layout.help_panel
         pygame.draw.rect(self.screen, self.colors['ui_bg'], panel_rect)
         pygame.draw.rect(self.screen, self.colors['ui_border'], panel_rect, 3)
 
         # Title
         title_text = self.font_large.render("Help & Controls", True, self.colors['text'])
-        title_rect = title_text.get_rect(centerx=panel_x + panel_width // 2, y=panel_y + 10)
+        title_rect = title_text.get_rect(centerx=panel_rect.centerx, y=panel_rect.y + 10)
         self.screen.blit(title_text, title_rect)
 
-        # Help content (scrollable area)
-        content_y = panel_y + 50
-        content_height = panel_height - 60
+        content_y = panel_rect.y + HELP_TITLE_HEIGHT
+        visible_lines = self.layout.help_visible_lines()
 
-        help_lines = [
-            "Mouse Controls:",
-            "• Left Click: Select states/UI",
-            "• Shift+Click: Start transition",
-            "• Right Click: Context menu",
-            "• Middle Click+Drag: Pan view",
-            "• Scroll Wheel: Zoom",
-            "",
-            "Keyboard Shortcuts:",
-            "• Space: Add state at center",
-            "• Delete: Remove selected state",
-            "• Q: Toggle accept state",
-            "• W: Toggle dead end state",
-            "• R: Reset camera view",
-            "",
-            "Creating Transitions:",
-            "• Select symbol from toolbar",
-            "• Shift+click source state",
-            "• Click target state",
-            "",
-            "Testing Strings:",
-            "• Enter string in input field",
-            "• Click Test or press Enter",
-            "",
-            "Execution Visualization:",
-            "• N: Next step",
-            "• P: Previous step",
-            "• ESC: Stop visualization",
-            "",
-            "File Operations:",
-            "• Save/Load buttons in toolbar"
-        ]
-
-        # Draw help text with scrolling
-        line_height = 18
-        visible_lines = content_height // line_height
-
-        # Calculate which lines to show based on scroll offset
-        start_line = max(0, self.help_scroll_offset)
-        end_line = min(len(help_lines), start_line + visible_lines)
+        start_line = max(0, min(self.help_scroll_offset,
+                                max(0, len(HELP_LINES) - visible_lines)))
+        end_line = min(len(HELP_LINES), start_line + visible_lines)
 
         for i in range(start_line, end_line):
-            line = help_lines[i]
-            display_y = content_y + (i - start_line) * line_height
-
-            # Skip if outside visible area
-            if display_y < content_y or display_y > content_y + content_height:
-                continue
-
-            if line.startswith("•"):
-                # Indent bullet points
-                text_x = panel_x + 30
-            elif line.endswith(":"):
-                # Headers
-                text_x = panel_x + 15
-            else:
-                text_x = panel_x + 15
-
+            line = HELP_LINES[i]
+            display_y = content_y + (i - start_line) * HELP_LINE_HEIGHT
+            text_x = panel_rect.x + (30 if line.startswith("-") else 15)
             text_surface = self.font_small.render(line, True, self.colors['text'])
+            self.screen.blit(text_surface, (text_x, display_y))
 
-            # Only draw if within the content area
-            if display_y >= content_y and display_y + line_height <= content_y + content_height:
-                self.screen.blit(text_surface, (text_x, display_y))
-
-        # Draw scroll indicator if needed
-        if len(help_lines) > visible_lines:
-            # Scroll bar
-            scrollbar_x = panel_x + panel_width - 15
-            scrollbar_height = content_height
+        # Scrollbar
+        if len(HELP_LINES) > visible_lines:
+            scrollbar_x = panel_rect.right - 15
+            scrollbar_height = visible_lines * HELP_LINE_HEIGHT
             scrollbar_rect = pygame.Rect(scrollbar_x, content_y, 10, scrollbar_height)
             pygame.draw.rect(self.screen, self.colors['ui_border'], scrollbar_rect)
 
-            # Scroll thumb
-            thumb_height = max(20, int(scrollbar_height * visible_lines / len(help_lines)))
+            thumb_height = max(20, int(scrollbar_height * visible_lines / len(HELP_LINES)))
             thumb_y = content_y + int((scrollbar_height - thumb_height) * start_line
-                                      / (len(help_lines) - visible_lines))
+                                      / (len(HELP_LINES) - visible_lines))
             thumb_rect = pygame.Rect(scrollbar_x + 1, thumb_y, 8, thumb_height)
             pygame.draw.rect(self.screen, self.colors['button_normal'], thumb_rect)
 
-            # Scroll instructions
-            scroll_text = "Use mouse wheel to scroll"
-            scroll_surface = self.font_small.render(scroll_text, True, self.colors['text'])
-            scroll_rect = scroll_surface.get_rect(centerx=panel_x + panel_width // 2, y=panel_y + panel_height - 15)
-            self.screen.blit(scroll_surface, scroll_rect)
+            footer = self.font_small.render("Scroll wheel to see more", True,
+                                            self.colors['text'])
+            self.screen.blit(footer, footer.get_rect(centerx=panel_rect.centerx,
+                                                     y=panel_rect.bottom - 20))
 
     def _draw_context_menu(self):
         """Draw the context menu if visible."""
@@ -929,12 +986,11 @@ class UIManager:
             return
 
         menu_x, menu_y = self.context_menu.position
-        item_height = 25
-        menu_width = 150
-        menu_height = len(self.context_menu.items) * item_height
+        item_height = CONTEXT_MENU_ITEM_HEIGHT
+        menu_width = CONTEXT_MENU_WIDTH
 
         # Background
-        menu_rect = pygame.Rect(menu_x, menu_y, menu_width, menu_height)
+        menu_rect = self._context_menu_rect()
         pygame.draw.rect(self.screen, self.colors['ui_bg'], menu_rect)
         pygame.draw.rect(self.screen, self.colors['ui_border'], menu_rect, 2)
 
@@ -966,12 +1022,11 @@ class UIManager:
             return None
 
         menu_x, menu_y = self.context_menu.position
-        item_height = 25
-        menu_width = 150
 
         for i, (label, action) in enumerate(self.context_menu.items):
-            item_y = menu_y + i * item_height
-            item_rect = pygame.Rect(menu_x, item_y, menu_width, item_height)
+            item_y = menu_y + i * CONTEXT_MENU_ITEM_HEIGHT
+            item_rect = pygame.Rect(menu_x, item_y, CONTEXT_MENU_WIDTH,
+                                    CONTEXT_MENU_ITEM_HEIGHT)
 
             if item_rect.collidepoint(mouse_pos) and label != "---":
                 return action
@@ -991,6 +1046,26 @@ class UIManager:
     def hide_context_menu(self):
         """Hide the context menu."""
         self.context_menu = None
+
+    def _context_menu_rect(self) -> pygame.Rect:
+        """Bounding box of the open context menu."""
+        if not self.context_menu:
+            return pygame.Rect(0, 0, 0, 0)
+        menu_x, menu_y = self.context_menu.position
+        return pygame.Rect(menu_x, menu_y, CONTEXT_MENU_WIDTH,
+                           len(self.context_menu.items) * CONTEXT_MENU_ITEM_HEIGHT)
+
+    def _symbol_dialog_buttons(self) -> Tuple[pygame.Rect, pygame.Rect]:
+        """Cancel and Add rectangles for the add-symbol dialog.
+
+        Computed rather than recorded during drawing, so the buttons are live on
+        the frame the dialog opens instead of the frame after.
+        """
+        width, height = 300, 180
+        x = (self.screen_width - width) // 2
+        y = (self.screen_height - height) // 2
+        return (pygame.Rect(x + 50, y + 130, 80, 25),
+                pygame.Rect(x + 170, y + 130, 80, 25))
 
     def add_symbol(self, symbol: str) -> bool:
         """
@@ -1012,6 +1087,7 @@ class UIManager:
             return False
 
         self.available_symbols.append(symbol)
+        self._recompute_symbol_buttons()
         return True
 
     def remove_symbol(self, symbol: str) -> bool:
@@ -1043,16 +1119,12 @@ class UIManager:
             execution_string: String being processed
             execution_path: Path of states visited
         """
+        self.execution_panel_visible = execution_active
         if not execution_active:
             return
 
-        # Execution panel
-        panel_width = 300
-        panel_height = 120
-        panel_x = self.screen_width - panel_width - 20
-        panel_y = 180
-
-        panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
+        panel_rect = self.layout.execution_panel
+        panel_x, panel_y = panel_rect.x, panel_rect.y
         pygame.draw.rect(self.screen, self.colors['ui_bg'], panel_rect)
         pygame.draw.rect(self.screen, self.colors['ui_border'], panel_rect, 2)
 
@@ -1126,15 +1198,10 @@ class UIManager:
             cursor_y2 = input_rect.bottom - 5
             pygame.draw.line(self.screen, self.colors['text'], (cursor_x, cursor_y1), (cursor_x, cursor_y2), 2)
 
-        # Buttons - moved down to prevent overlap
-        button_width = 80
-        button_height = 25
-        cancel_button = pygame.Rect(dialog_x + 50, dialog_y + 130, button_width, button_height)
-        add_button = pygame.Rect(dialog_x + 170, dialog_y + 130, button_width, button_height)
-
-        # Store button rects for click detection
-        self.symbol_dialog_cancel_rect = cancel_button
-        self.symbol_dialog_add_rect = add_button
+        # Buttons come from _symbol_dialog_buttons so that clicking and drawing
+        # use one definition, and so the buttons work on the dialog's first
+        # frame rather than only after it has been painted once.
+        cancel_button, add_button = self._symbol_dialog_buttons()
 
         # Cancel button
         pygame.draw.rect(self.screen, self.colors['button_normal'], cancel_button)
