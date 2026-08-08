@@ -52,11 +52,11 @@ select = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["fsa", "core", "rendering", "ui"]
+known-first-party = ["fsa", "editor", "rendering", "ui"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "core", "rendering", "ui", "main.py", "tests"]
+files = ["src", "rendering", "ui", "main.py", "editor.py", "tests"]
 mypy_path = "src"
 # The existing GUI code is not annotated well enough for strict mode yet.
 # Strictness is raised package by package as each is rewritten.

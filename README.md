@@ -108,30 +108,48 @@ language **a\*b⁺** — any number of `a`s followed by at least one `b`:
 
 ## File format
 
-Automata are stored as JSON:
+A versioned JSON envelope. The automaton and its layout are separate, so moving a state cannot
+change the language. Every collection is sorted and each transition is one line, so saving twice
+produces identical bytes and a file diffs like source.
 
 ```json
 {
-  "states": { "q0": { "position": [200, 200], "state_type": "normal" } },
-  "transitions": { "q0": { "0": "q0", "1": "q1" } },
-  "alphabet": ["0", "1"],
-  "initial_state": "q0",
-  "accept_states": ["q1"],
-  "dead_end_states": ["q2"],
-  "next_state_id": 3
+  "version": 2,
+  "automaton": {
+    "states": ["q0", "q1"],
+    "alphabet": ["0", "1"],
+    "initial": "q0",
+    "accept": ["q1"],
+    "transitions": [["q0", "0", "q0"], ["q0", "1", "q1"]],
+    "labels": {}
+  },
+  "layout": {
+    "positions": { "q0": [220.0, 220.0], "q1": [470.0, 220.0] },
+    "arcs": [["q0", "q1", 34.0]]
+  },
+  "next_id": 2
 }
 ```
+
+Files in the pre-versioning format still open. Their `dead_end_states` list is deliberately
+dropped on read: it was a flag that made the simulator reject early without any transition saying
+so, and honouring it would reintroduce the defect that removing it fixed. A state that is
+genuinely a trap still reads as one, because that is derived from the edges now.
 
 ## Project layout
 
 ```
-main.py                    application class, event loop, scene building
+main.py                    application shell: window, input routing, scene building
+editor.py                  editing state: selection, hover, drag, dirty
 src/fsa/                   the automata engine -- no pygame, no dependencies
   automaton.py               immutable DFA; flat transition function
   simulate.py                Run, Verdict, and explain()
   analysis.py                reachability, dead states, defects
-core/                      legacy editor model, being retired
+  layout.py                  positions and curve offsets
+  document.py                an automaton together with its layout
+  serialize.py               versioned, byte-stable JSON
 rendering/
+  camera.py                  viewport pan and zoom
   theme.py                   design tokens: two palettes, one set of names
   fonts.py                   system font selection and caching
   geometry.py                path maths -- edges, self-loops, arrowheads
@@ -159,16 +177,12 @@ loading with unsaved changes asks for confirmation first.
 
 These are known and tracked. Listing them here rather than letting you discover them the hard way:
 
-- **The editor still uses a separate legacy model.** Simulation and analysis go through the
-  engine, so verdicts and trap states are correct, but editing operations do not yet. Deleting the
-  start state, for instance, still promotes another state rather than leaving none.
-- **Transitions cannot be deleted or edited individually.** Drawing a new transition on the same
-  symbol replaces the old one; otherwise the only way to remove one is to delete a state.
-- **There is no undo.**
-- **`q`, `w`, `r`, `n`, and `p` cannot be used as alphabet symbols**, because those keys are bound
-  to editor shortcuts.
-- **The symbol palette and the automaton's alphabet are separate.** Loading a file adds its
-  symbols to the palette, but the two are not otherwise kept in step.
+- **Transitions cannot be deleted or edited from the canvas.** Drawing a new transition on the
+  same symbol replaces the old one; otherwise the only way to remove one is to delete a state.
+- **There is no undo.** The document is immutable, so this is a small change now rather than a
+  structural one, but it is not done.
+- **`q`, `w`, `r`, `n` and `p` can be alphabet symbols but cannot be *typed* to select one**,
+  because those keys are still bound to editor shortcuts. Click them in the palette instead.
 - No NFA, ε-transitions, minimisation, equivalence checking, or regular-expression conversion yet.
 
 ## Development
@@ -181,6 +195,8 @@ pytest            # tests, headless
 ```
 
 `src/fsa/` is the automata engine: immutable, dependency-free, and importable without a display.
+Everything is a value, so a snapshot cannot change underneath the code holding it.
+
 `rendering/` is the view layer — `theme.py` holds every colour and spacing token, `geometry.py` is
 pure path maths shared with the future SVG exporter, and `scene.py` is the boundary that keeps the
 renderer ignorant of automata.

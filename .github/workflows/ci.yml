@@ -62,7 +62,7 @@ jobs:
           import ast, pathlib, sys
           banned = {"pygame", "networkx", "numpy", "automata", "frozendict"}
           bad = []
-          for path in list(pathlib.Path("src/fsa").rglob("*.py")) + list(pathlib.Path("core").rglob("*.py")):
+          for path in pathlib.Path("src/fsa").rglob("*.py"):
               tree = ast.parse(path.read_text(encoding="utf-8"))
               for node in ast.walk(tree):
                   if isinstance(node, ast.Import):

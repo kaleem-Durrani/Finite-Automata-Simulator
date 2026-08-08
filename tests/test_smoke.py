@@ -1,20 +1,16 @@
 """Smoke tests.
 
-These exist so that CI is not vacuous. They assert only that the modules
-import, that a DFA can be built and simulated, and that the demo automaton
-recognises the language the README claims it does.
-
-The real test suites — a conformance spec written against hand-computed
-delta-hat, and headless event-replay tests for the app layer — arrive with
-the next phase of work.
+The ground floor: the modules import, a document can be built and simulated,
+and the camera round-trips. Deeper behaviour lives in the conformance spec, the
+engine suite, the geometry suite and the app regressions.
 """
 
 import pygame
 import pytest
 
-from core.camera import Camera
-from core.dfa import DFA
-from core.state import State, StateType
+import fsa
+from editor import EditorModel
+from rendering.camera import Camera
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -27,24 +23,10 @@ def _pygame_display():
 
 
 @pytest.fixture
-def demo() -> DFA:
-    """The automaton the application creates on startup.
-
-    Recognises a*b+ : any number of 'a's followed by at least one 'b'.
-    """
-    dfa = DFA()
-    q0 = dfa.add_state((200, 200))
-    q1 = dfa.add_state((400, 200))
-    q2 = dfa.add_state((300, 350))
-    dfa.set_state_type(q1, StateType.ACCEPT)
-    dfa.set_state_type(q2, StateType.DEAD_END)
-    dfa.add_transition(q0, q0, "a")
-    dfa.add_transition(q0, q1, "b")
-    dfa.add_transition(q1, q2, "a")
-    dfa.add_transition(q1, q1, "b")
-    dfa.add_transition(q2, q2, "a")
-    dfa.add_transition(q2, q2, "b")
-    return dfa
+def demo():
+    """The document the application opens with: a*b+."""
+    import main
+    return main.demo_document()
 
 
 def test_modules_import():
@@ -54,37 +36,27 @@ def test_modules_import():
     import ui.ui_manager  # noqa: F401
 
 
-def test_core_is_pygame_free():
-    """core/ must not depend on pygame.
+def test_engine_is_display_free():
+    """fsa must not depend on pygame, and nothing may sneak it back in.
 
-    This is the boundary the project is being built around: the automata
-    engine has to stay usable without a display. Guarding it with a test
-    means the dependency cannot creep back in unnoticed.
+    Parses the imports rather than searching the text: the engine's own
+    docstrings explain this rule, and a substring search flags them.
     """
-    import importlib
+    import ast
     import pathlib
 
-    core_dir = pathlib.Path(importlib.import_module("core").__file__).parent
-    offenders = [
-        path.name
-        for path in core_dir.glob("*.py")
-        if "pygame" in path.read_text(encoding="utf-8")
-    ]
-    assert offenders == [], f"pygame referenced in core/: {offenders}"
-
-
-def test_add_state_sets_initial_state():
-    dfa = DFA()
-    first = dfa.add_state((0, 0))
-    dfa.add_state((100, 0))
-    assert dfa.initial_state == first
-
-
-def test_state_hit_testing():
-    state = State("q0", (100, 100))
-    assert state.contains_point((100, 100))
-    assert state.contains_point((100 + state.radius - 1, 100))
-    assert not state.contains_point((100 + state.radius + 1, 100))
+    banned = {"pygame", "networkx", "numpy"}
+    for module in pathlib.Path(fsa.__file__).parent.rglob("*.py"):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                assert name.split(".")[0] not in banned, f"{module.name}: {name}"
 
 
 def test_camera_round_trips_screen_and_world():
@@ -92,36 +64,31 @@ def test_camera_round_trips_screen_and_world():
     camera.pan(37, -14)
     camera.zoom_at((400, 300), 1.5)
     world = camera.screen_to_world((123, 456))
-    screen = camera.world_to_screen(world)
-    assert screen == pytest.approx((123, 456))
+    assert camera.world_to_screen(world) == pytest.approx((123, 456))
 
 
-@pytest.mark.parametrize(
-    ("word", "accepted"),
-    [
-        ("b", True),
-        ("ab", True),
-        ("aab", True),
-        ("abb", True),
-        ("bb", True),
-        ("", False),
-        ("a", False),
-        ("aa", False),
-        ("ba", False),
-        ("aba", False),
-    ],
-)
-def test_demo_recognises_a_star_b_plus(demo: DFA, word: str, accepted: bool):
-    assert demo.process_string(word)[0] is accepted
+def test_demo_recognises_a_star_b_plus(demo):
+    accepted = ["b", "ab", "aab", "abb", "bb"]
+    rejected = ["", "a", "aa", "ba", "aba"]
+    for word in accepted:
+        assert fsa.accepts(demo.automaton, word), word
+    for word in rejected:
+        assert not fsa.accepts(demo.automaton, word), word
 
 
-def test_rejected_word_outside_alphabet(demo: DFA):
-    accepted, path = demo.process_string("abz")
-    assert accepted is False
-    assert path[0] == demo.initial_state
+def test_demo_has_a_layout(demo):
+    """Every state must have coordinates, or it renders at the origin."""
+    assert set(demo.layout.positions) == set(demo.automaton.states)
 
 
-def test_path_starts_at_initial_state(demo: DFA):
-    _, path = demo.process_string("aab")
-    assert path[0] == demo.initial_state
-    assert len(path) == len("aab") + 1
+def test_editor_starts_clean(demo):
+    editor = EditorModel(demo)
+    assert editor.dirty is False
+    assert editor.selection is None
+    assert editor.path is None
+
+
+def test_editing_marks_the_document_dirty(demo):
+    editor = EditorModel(demo)
+    editor.add_state((900.0, 900.0))
+    assert editor.dirty is True

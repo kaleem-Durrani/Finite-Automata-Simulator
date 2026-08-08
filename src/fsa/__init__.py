@@ -26,6 +26,7 @@ from fsa.analysis import (
     unreachable_states,
 )
 from fsa.automaton import DFA
+from fsa.document import Document
 from fsa.errors import (
     AutomatonError,
     DuplicateStateError,
@@ -33,12 +34,23 @@ from fsa.errors import (
     IncompleteAutomatonError,
     UnknownStateError,
 )
+from fsa.layout import Layout, Point
+from fsa.serialize import (
+    DocumentFormatError,
+    dumps,
+    load_or_error,
+    loads,
+    save_or_error,
+)
 from fsa.simulate import Run, Step, Verdict, accepts, run
 from fsa.symbols import StateId, Symbol, is_legal_symbol, normalize_alphabet
 
 __all__ = [
     # model
     "DFA",
+    "Document",
+    "Layout",
+    "Point",
     "StateId",
     "Symbol",
     "is_legal_symbol",
@@ -59,6 +71,12 @@ __all__ = [
     "dead_states",
     "unreachable_states",
     "is_trap",
+    # documents
+    "dumps",
+    "loads",
+    "load_or_error",
+    "save_or_error",
+    "DocumentFormatError",
     # errors
     "AutomatonError",
     "IllegalSymbolError",

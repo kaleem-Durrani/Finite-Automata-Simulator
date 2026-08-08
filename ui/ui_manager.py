@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pygame
 
-from core.dfa import DFA
+import fsa
 from rendering import primitives
 from rendering.fonts import FontBook
 from rendering.theme import Theme
@@ -120,9 +120,11 @@ class UIManager:
         self.selected_symbol = 'a'
         self.context_menu: Optional[ContextMenu] = None
         
-        # Available symbols for transitions (can be modified by user)
-        self.available_symbols = ['a', 'b', '0', '1']
-        self.system_keys = {'n', 'p', 'escape', 'space', 'delete', 'q', 'w', 'r'}  # Reserved keys
+        # The palette *is* the automaton's alphabet, kept in sync by
+        # sync_symbols_with. It used to be a separate hardcoded list, so the
+        # symbols you could draw with and the symbols the machine recognised
+        # were two unrelated sets.
+        self.available_symbols: List[str] = []
 
         # Symbol addition dialog state
         self.adding_symbol = False
@@ -555,18 +557,16 @@ class UIManager:
         self.confirm_message = ""
         self.confirm_intent = None
 
-    def sync_symbols_with(self, dfa: DFA):
-        """
-        Make sure every symbol used by the automaton appears in the palette.
+    def sync_symbols_with(self, automaton: "fsa.DFA"):
+        """Adopt the automaton's alphabet as the palette.
 
-        The palette and the automaton's alphabet are still two separate things
-        (they are unified in a later phase), so loading a file over a different
-        alphabet would otherwise leave its symbols undrawable.
+        One source of truth: what you can draw with is exactly what the machine
+        recognises. Previously these were two unrelated sets, so a loaded file's
+        symbols could be unusable and a palette symbol could be outside the
+        alphabet entirely.
         """
-        for symbol in sorted(dfa.alphabet):
-            if symbol not in self.available_symbols:
-                self.available_symbols.append(symbol)
-        if self.selected_symbol not in self.available_symbols and self.available_symbols:
+        self.available_symbols = sorted(automaton.alphabet)
+        if self.available_symbols and self.selected_symbol not in self.available_symbols:
             self.selected_symbol = self.available_symbols[0]
         self._recompute_symbol_buttons()
 
@@ -624,13 +624,12 @@ class UIManager:
                 self.adding_symbol = False
                 self.new_symbol_input = ""
             elif event.key == pygame.K_RETURN:
-                # Try to add the symbol
-                if self.new_symbol_input and self.add_symbol(self.new_symbol_input):
+                if self.new_symbol_input and self.can_add_symbol(self.new_symbol_input):
                     actions['symbol_added'] = self.new_symbol_input
                     self.adding_symbol = False
                     self.new_symbol_input = ""
                 else:
-                    actions['symbol_add_error'] = "Invalid symbol or already exists"
+                    actions['symbol_add_error'] = "Not a symbol, or already in the alphabet"
             elif event.key == pygame.K_BACKSPACE:
                 if self.new_symbol_input:
                     self.new_symbol_input = self.new_symbol_input[:-1]
@@ -678,7 +677,7 @@ class UIManager:
                     if self.input_text:
                         self.input_text = self.input_text[:-1]
 
-    def draw(self, dfa: DFA, test_result: str = "", animation_active: bool = False):
+    def draw(self, automaton: "fsa.DFA", test_result: str = "", animation_active: bool = False):
         """
         Draw all UI elements.
 
@@ -692,8 +691,8 @@ class UIManager:
         self._animation_active = animation_active
         self._draw_toolbar()
         self._draw_input_area(test_result)
-        self._draw_alphabet_selector(dfa)
-        self._draw_status_info(dfa)
+        self._draw_alphabet_selector()
+        self._draw_status_info(automaton)
 
         if self.show_help:
             self._draw_help_panel()
@@ -889,7 +888,7 @@ class UIManager:
             surface = self.fonts.ui("small").render(detail, True, palette.text_muted)
         self.screen.blit(surface, (detail_x, y + 2))
 
-    def _draw_alphabet_selector(self, _dfa: DFA):
+    def _draw_alphabet_selector(self):
         """Draw the alphabet selector with available symbols.
 
         Reads the rectangles computed in _recompute_symbol_buttons rather than
@@ -936,7 +935,7 @@ class UIManager:
         add_rect = self.add_symbol_button_rect
         self._button(add_rect, "+", hovered=add_rect.collidepoint(mouse_pos))
 
-    def _draw_status_info(self, dfa: DFA):
+    def _draw_status_info(self, automaton: "fsa.DFA"):
         """Draw status information about the current automaton."""
         palette = self.theme.palette
         panel_rect = self.layout.status_panel
@@ -950,11 +949,11 @@ class UIManager:
         self._section_label("Automaton", (info_x, info_y))
 
         rows = [
-            ("States", str(len(dfa.states)), False),
-            ("Alphabet", ", ".join(sorted(dfa.alphabet)) if dfa.alphabet else "empty",
-             not dfa.alphabet),
-            ("Start", dfa.initial_state or "none", dfa.initial_state is None),
-            ("Accepting", str(len(dfa.accept_states)), self.warn_no_accepting),
+            ("States", str(len(automaton.states)), False),
+            ("Alphabet", ", ".join(sorted(automaton.alphabet)) if automaton.alphabet
+             else "empty", not automaton.alphabet),
+            ("Start", automaton.initial or "none", automaton.initial is None),
+            ("Accepting", str(len(automaton.accept)), self.warn_no_accepting),
         ]
 
         label_font = self.fonts.ui("small")
@@ -982,19 +981,24 @@ class UIManager:
             row_y += 18
 
         self._draw_animation_controls_in_status(info_x, row_y + 8)
-        self._draw_legend(dfa, panel_rect)
 
-    def _draw_legend(self, dfa: DFA, above: pygame.Rect) -> None:
+    def draw_legend(self, automaton: "fsa.DFA") -> None:
         """Explain the state styles, showing only the kinds actually present.
 
         A diagram that dims some states and hatches others is only useful if
         the reader knows what those mean. Listing every kind all the time would
         be noise, so entries appear as the automaton acquires them.
+
+        Sits under whichever panel is currently the lowest on the right, so it
+        cannot be painted over by the execution panel -- which is exactly what
+        happened when its position was fixed relative to the status panel.
         """
+        above = (self.layout.execution_panel if self.execution_panel_visible
+                 else self.layout.status_panel)
         palette = self.theme.palette
         entries = [("normal", palette.state_fill, palette.state_ring, "plain")]
 
-        if dfa.accept_states:
+        if automaton.accept:
             entries.append(("accepting", palette.accept_fill,
                             palette.accept_ring, "double"))
         if self.legend_dead:
@@ -1296,46 +1300,16 @@ class UIManager:
         return (pygame.Rect(x + 50, y + 130, 80, 25),
                 pygame.Rect(x + 170, y + 130, 80, 25))
 
-    def add_symbol(self, symbol: str) -> bool:
+    def can_add_symbol(self, symbol: str) -> bool:
+        """Whether a symbol could be added to the alphabet.
+
+        Delegates to the engine rather than keeping its own rules, and no
+        longer reserves letters. `q`, `w`, `r`, `n` and `p` used to be rejected
+        because keyboard shortcuts owned them, which meant no automaton over an
+        alphabet containing those letters could be built at all.
         """
-        Add a new symbol to the available symbols.
-
-        Args:
-            symbol: Single character symbol to add
-
-        Returns:
-            True if added successfully, False if invalid or already exists
-        """
-        # Validate symbol
-        if (len(symbol) != 1 or
-            symbol in self.available_symbols or
-            symbol.lower() in self.system_keys or
-            symbol.upper() in self.system_keys or
-            not symbol.isprintable() or
-            symbol.isspace()):
-            return False
-
-        self.available_symbols.append(symbol)
-        self._recompute_symbol_buttons()
-        return True
-
-    def remove_symbol(self, symbol: str) -> bool:
-        """
-        Remove a symbol from available symbols.
-
-        Args:
-            symbol: Symbol to remove
-
-        Returns:
-            True if removed successfully, False if not found
-        """
-        if symbol in self.available_symbols and len(self.available_symbols) > 1:
-            self.available_symbols.remove(symbol)
-            # Change selected symbol if it was removed
-            if self.selected_symbol == symbol:
-                self.selected_symbol = self.available_symbols[0]
-            return True
-        return False
+        return (fsa.is_legal_symbol(symbol)
+                and symbol not in self.available_symbols)
 
     def draw_execution_status(self, execution_active: bool, execution_step: int,
                               _execution_string: str, execution_path: List[str],

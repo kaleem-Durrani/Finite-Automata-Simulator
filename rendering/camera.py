@@ -1,8 +1,8 @@
-"""
-Camera module for viewport management.
+"""Viewport: panning and zooming the workspace.
 
-This module provides camera functionality for panning and zooming
-the view of the automaton workspace.
+Lives with the rest of the view layer. It was under core/ alongside the
+automaton, which was the wrong side of the boundary -- a camera is not part of
+what an automaton is.
 """
 
 from typing import Sequence, Tuple
