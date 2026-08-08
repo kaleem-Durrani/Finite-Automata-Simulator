@@ -47,12 +47,24 @@ def send(app: AutomatonSimulator, event: pygame.event.Event):
     app._handle_events()
 
 
-def click(app: AutomatonSimulator, pos, button: int = 1, mod: int = 0):
-    send(app, pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=button, pos=pos, mod=mod))
+def click(app: AutomatonSimulator, pos, button: int = 1, shift: bool = False):
+    """Click, building the event with exactly the fields pygame provides.
+
+    Mouse events carry no `.mod`; modifier state lives on the keyboard and is
+    read from pygame.key. Passing a fabricated `mod=` here is what let a real
+    crash (AttributeError on event.mod) pass the whole suite -- the synthetic
+    events had a field the real ones never do.
+    """
+    pygame.key.set_mods(pygame.KMOD_LSHIFT if shift else pygame.KMOD_NONE)
+    try:
+        send(app, pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=button, pos=pos))
+    finally:
+        pygame.key.set_mods(pygame.KMOD_NONE)
 
 
-def press(app: AutomatonSimulator, code: int, char: str = "", mod: int = 0):
-    send(app, pygame.event.Event(pygame.KEYDOWN, key=code, unicode=char, mod=mod))
+def press(app: AutomatonSimulator, code: int, char: str = ""):
+    send(app, pygame.event.Event(pygame.KEYDOWN, key=code, unicode=char,
+                                 mod=pygame.KMOD_NONE, scancode=0))
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +493,7 @@ def test_shift_click_starts_a_transition_without_dragging(app):
     before = list(state.position)
     screen_pos = app.renderer.camera.world_to_screen(state.position)
 
-    click(app, (int(screen_pos[0]), int(screen_pos[1])), mod=pygame.KMOD_LSHIFT)
+    click(app, (int(screen_pos[0]), int(screen_pos[1])), shift=True)
 
     assert app.creating_transition is True
     assert app.transition_start_state == "q0"
@@ -503,6 +515,56 @@ def test_plain_click_still_selects_and_drags(app):
     assert app.selected_state == "q0"
     assert app.dragging_state == "q0"
     assert app.creating_transition is False
+
+
+def test_handlers_only_read_fields_real_events_carry(app):
+    """Guard against handlers reading attributes pygame never sets.
+
+    A previous version read `event.mod` on a MOUSEBUTTONDOWN. Mouse events have
+    no modifier field, so every real click raised AttributeError and the app
+    died on startup -- while the suite stayed green, because the test helpers
+    constructed events with a `mod=` kwarg that real events never have.
+
+    These events are built with pygame's own field set and nothing else.
+    """
+    width, height = app.screen.get_size()
+    centre = (width // 2, height // 2)
+
+    events = [
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=centre),
+        pygame.event.Event(pygame.MOUSEMOTION, pos=centre, rel=(1, 1), buttons=(1, 0, 0)),
+        pygame.event.Event(pygame.MOUSEBUTTONUP, button=1, pos=centre),
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=centre),
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=2, pos=centre),
+        pygame.event.Event(pygame.MOUSEBUTTONUP, button=2, pos=centre),
+        pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=1, flipped=False, precise_x=0.0,
+                           precise_y=1.0),
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE, unicode=" ",
+                           mod=pygame.KMOD_NONE, scancode=44),
+        pygame.event.Event(pygame.KEYUP, key=pygame.K_SPACE,
+                           mod=pygame.KMOD_NONE, scancode=44),
+        pygame.event.Event(pygame.VIDEORESIZE, w=900, h=700, size=(900, 700)),
+    ]
+
+    for event in events:
+        send(app, event)
+        pump(app, frames=1)
+
+
+def test_shift_click_reads_the_keyboard_not_the_event(app):
+    """Shift state must come from pygame.key, which is where pygame keeps it."""
+    state = app.dfa.states["q0"]
+    screen_pos = app.renderer.camera.world_to_screen(state.position)
+    point = (int(screen_pos[0]), int(screen_pos[1]))
+
+    pygame.key.set_mods(pygame.KMOD_LSHIFT)
+    try:
+        send(app, pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=point))
+    finally:
+        pygame.key.set_mods(pygame.KMOD_NONE)
+
+    assert app.creating_transition is True
+    assert app.dragging_state is None
 
 
 def test_no_input_polling_remains():

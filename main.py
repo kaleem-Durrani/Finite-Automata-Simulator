@@ -177,11 +177,23 @@ class AutomatonSimulator:
     def _handle_mouse_down(self, event):
         """Handle mouse button down events that the UI did not consume."""
         if event.button == 1:  # Left click
-            self._handle_left_click(event.pos, bool(event.mod & pygame.KMOD_SHIFT))
+            self._handle_left_click(event.pos, self._shift_held())
         elif event.button == 2:  # Middle click
             self._start_panning(event.pos)
         elif event.button == 3:  # Right click
             self._handle_right_click(event.pos)
+
+    @staticmethod
+    def _shift_held() -> bool:
+        """
+        Whether a shift key is down right now.
+
+        Mouse events in pygame carry no modifier state -- only key events have
+        a `.mod` field -- so a click has to ask the keyboard directly. This is
+        read once while handling the event, not sampled every frame, which is
+        what made shift+click drag the state it was drawing from.
+        """
+        return bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
 
     def _handle_mouse_up(self, event):
         """Handle mouse button up events."""
