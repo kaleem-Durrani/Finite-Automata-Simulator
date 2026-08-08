@@ -70,9 +70,11 @@ class DFA:
         if state_id not in self.states:
             return False
             
-        # Remove the state
+        # Remove the state. `transitions` may not have an entry for this state
+        # if the automaton was loaded from a file whose "transitions" object
+        # omitted states with no outgoing edges, so pop defensively.
         del self.states[state_id]
-        del self.transitions[state_id]
+        self.transitions.pop(state_id, None)
         
         # Remove transitions to this state from other states
         for from_state in self.transitions:
@@ -117,6 +119,9 @@ class DFA:
         """
         if from_state not in self.states or to_state not in self.states:
             return False
+
+        # A state loaded from file may have no entry here (see remove_state).
+        self.transitions.setdefault(from_state, {})
 
         # Remove existing transition with same symbol if it exists
         if symbol in self.transitions[from_state]:
@@ -242,22 +247,42 @@ class DFA:
         """
         Serialize the DFA to a dictionary for saving.
 
+        The result is an independent snapshot: `position` and `transitions` are
+        copied rather than shared. Returning the live objects meant a caller
+        holding the dict watched it change underneath them -- loading a file
+        emptied a previously-taken snapshot, because from_dict clears the very
+        dict the snapshot was pointing at.
+
         Returns:
             Dictionary representation of the DFA
         """
         return {
             'states': {
                 state_id: {
-                    'position': state.position,
+                    'position': list(state.position),
                     'state_type': state.state_type.value
                 }
                 for state_id, state in self.states.items()
             },
-            'transitions': self.transitions,
-            'alphabet': list(self.alphabet),
+            'transitions': {
+                state_id: dict(symbol_map)
+                for state_id, symbol_map in self.transitions.items()
+            },
+            # Sets are serialized sorted. Python randomises string hashing per
+            # process, so list(some_set) has no stable order: without sorting,
+            # saving the same automaton twice produces different bytes and the
+            # file is useless to diff or to compare in a test.
+            'alphabet': sorted(self.alphabet),
             'initial_state': self.initial_state,
-            'accept_states': list(self.accept_states),
-            'dead_end_states': list(self.dead_end_states),
+            'accept_states': sorted(self.accept_states),
+            'dead_end_states': sorted(self.dead_end_states),
+            # Arc offsets are presentation data, but they are the user's work:
+            # without them a saved automaton reloads with all its curves flat.
+            'arc_offsets': {
+                f"{from_state}|{to_state}": group['arc_offset']
+                for (from_state, to_state), group in sorted(self.transition_groups.items())
+                if group.get('arc_offset', 0.0) != 0.0
+            },
             'next_state_id': self._next_state_id
         }
 
@@ -268,9 +293,13 @@ class DFA:
         Args:
             data: Dictionary containing DFA data
         """
-        # Clear current data
+        # Clear current data. transition_groups must be cleared too -- it is a
+        # second representation of the transition function, and leaving it
+        # populated means the renderer draws the *previous* automaton's edges
+        # over the newly loaded states.
         self.states.clear()
         self.transitions.clear()
+        self.transition_groups.clear()
         self.alphabet.clear()
         self.accept_states.clear()
         self.dead_end_states.clear()
@@ -281,15 +310,55 @@ class DFA:
             state.state_type = StateType(state_data['state_type'])
             self.states[state_id] = state
 
+        # Load transitions, guaranteeing one entry per state and discarding any
+        # edge that names a state the file does not define.
+        raw_transitions = data.get('transitions', {})
+        self.transitions = {
+            state_id: {
+                symbol: target
+                for symbol, target in raw_transitions.get(state_id, {}).items()
+                if target in self.states
+            }
+            for state_id in self.states
+        }
+
         # Load other data
-        self.transitions = data.get('transitions', {})
         self.alphabet = set(data.get('alphabet', []))
         self.initial_state = data.get('initial_state')
-        self.accept_states = set(data.get('accept_states', []))
-        self.dead_end_states = set(data.get('dead_end_states', []))
+        if self.initial_state is not None and self.initial_state not in self.states:
+            self.initial_state = None
+        self.accept_states = {s for s in data.get('accept_states', []) if s in self.states}
+        self.dead_end_states = {s for s in data.get('dead_end_states', []) if s in self.states}
         self._next_state_id = data.get('next_state_id', 0)
 
-    def save_to_file(self, filename: str) -> bool:
+        self._rebuild_transition_groups(data.get('arc_offsets', {}))
+
+    def _rebuild_transition_groups(self, arc_offsets: Optional[Dict[str, float]] = None):
+        """
+        Regenerate transition_groups from the transition function.
+
+        transition_groups is a rendering-oriented view of `transitions`: it maps
+        a (from, to) pair to the set of symbols on that edge, plus the curve
+        offset. It is derived data, so it can always be rebuilt from the
+        authoritative `transitions` mapping.
+
+        Args:
+            arc_offsets: Optional "from|to" -> offset mapping to restore.
+        """
+        arc_offsets = arc_offsets or {}
+        self.transition_groups.clear()
+
+        for from_state, symbol_map in self.transitions.items():
+            for symbol, to_state in symbol_map.items():
+                key = (from_state, to_state)
+                if key not in self.transition_groups:
+                    self.transition_groups[key] = {
+                        'symbols': set(),
+                        'arc_offset': float(arc_offsets.get(f"{from_state}|{to_state}", 0.0))
+                    }
+                self.transition_groups[key]['symbols'].add(symbol)
+
+    def save_to_file(self, filename: str) -> Tuple[bool, str]:
         """
         Save the DFA to a JSON file.
 
@@ -297,31 +366,43 @@ class DFA:
             filename: Path to save the file
 
         Returns:
-            True if successful, False otherwise
+            (True, "") on success, or (False, reason) on failure. The reason is
+            returned rather than printed so the caller can show it to the user;
+            nobody running a windowed application reads stdout.
         """
         try:
-            with open(filename, 'w') as f:
+            with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(self.to_dict(), f, indent=2)
-            return True
-        except Exception as e:
-            print(f"Error saving file: {e}")
-            return False
+            return True, ""
+        except OSError as e:
+            return False, e.strerror or str(e)
 
-    def load_from_file(self, filename: str) -> bool:
+    def load_from_file(self, filename: str) -> Tuple[bool, str]:
         """
         Load the DFA from a JSON file.
+
+        The automaton is only replaced if the file parses; a malformed file
+        leaves the current automaton untouched rather than half-loaded.
 
         Args:
             filename: Path to load the file from
 
         Returns:
-            True if successful, False otherwise
+            (True, "") on success, or (False, reason) on failure.
         """
         try:
-            with open(filename, 'r') as f:
+            with open(filename, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+        except OSError as e:
+            return False, e.strerror or str(e)
+        except json.JSONDecodeError as e:
+            return False, f"not valid JSON (line {e.lineno})"
+
+        if not isinstance(data, dict):
+            return False, "file does not contain an automaton"
+
+        try:
             self.from_dict(data)
-            return True
-        except Exception as e:
-            print(f"Error loading file: {e}")
-            return False
+        except (KeyError, TypeError, ValueError) as e:
+            return False, f"malformed automaton ({e})"
+        return True, ""
