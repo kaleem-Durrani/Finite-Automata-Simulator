@@ -46,5 +46,7 @@ scratch/
 notes/
 
 # ---- Runtime output from the simulator ----
-automaton_*.json
+# Automata saved from the app land in the project folder by default. Anything
+# meant to be kept goes in examples/.
+automaton*.json*
 *.log
