@@ -4,8 +4,7 @@ A visual DFA editor and simulator built with Python and Pygame. Draw states and 
 then step through how a string is processed, one symbol at a time.
 
 > **Status: early.** This is a working rewrite of an older prototype, and it is being actively
-> improved. Please read [Known limitations](#known-limitations) before relying on it — in
-> particular, **saving and loading do not round-trip yet**.
+> improved. Please read [Known limitations](#known-limitations) before relying on it.
 
 ## Features
 
@@ -55,7 +54,7 @@ python main.py
 | `R` | Reset the camera |
 | `N` / `P` | Next / previous step during execution |
 | `Tab` | Toggle automatic playback during execution |
-| `Esc` | Stop the execution trace |
+| `Esc` | Stop the execution trace, or close a dialog |
 
 Typing a symbol that is in the palette selects it for the next transition.
 
@@ -120,33 +119,65 @@ ui/ui_manager.py        toolbar, input field, symbol palette, context menus, hel
 examples/               sample automata
 ```
 
+## Saving and loading
+
+Save and Load prompt for a filename. Names are resolved against the project folder, and `.json`
+is appended if you leave the extension off, so a file saved in one session is findable in the
+next regardless of where you launched Python from.
+
+The window title shows the current file, with a `*` when there are unsaved changes. Quitting or
+loading with unsaved changes asks for confirmation first.
+
 ## Known limitations
 
-These are known and tracked. Listing them here rather than discovering them the hard way:
+These are known and tracked. Listing them here rather than letting you discover them the hard way:
 
-- **Save and Load do not round-trip.** Save writes a timestamped file into the current working
-  directory; Load always opens the bundled example. There is no file picker yet.
-- **Loading does not fully refresh the canvas** — transition arrows from the previous automaton
-  can persist after a load.
-- **Deleting a state while dragging it, or while a transition is pending, can crash the app.**
-  Press `Esc` to cancel a pending transition before deleting.
+- **Marking a state as a trap state changes how strings are evaluated** rather than the trap being
+  derived from the transition function. If a "dead end" state has an outgoing path to an accepting
+  state, the simulator rejects anyway — so the verdict can disagree with the diagram. This is the
+  most significant known defect; it is pinned by four failing cases in the conformance suite.
+- **A rejected string does not say why it was rejected.** No transition defined, symbol outside
+  the alphabet, and halting in a non-accepting state all report the same bare "REJECTED".
+- **The empty string cannot be tested** from the input field.
+- **Shift+click drags the state** as well as starting a transition, because the click is handled
+  twice. The transition still gets made; the state also moves.
+- **Right-click does nothing near the top and bottom of the window** — those bands are reserved
+  for the toolbar and input area regardless of what is actually drawn there.
+- **The help panel does not scroll**, so its last few lines are unreachable.
+- **The animation speed slider cannot be dragged.**
 - **Transitions cannot be deleted or edited individually.** Drawing a new transition on the same
   symbol replaces the old one; otherwise the only way to remove one is to delete a state.
 - **There is no undo.**
 - **`q`, `w`, `r`, `n`, and `p` cannot be used as alphabet symbols**, because those keys are bound
   to editor shortcuts.
-- **A rejected string does not say why it was rejected** — no transition, symbol outside the
-  alphabet, and halting in a non-accepting state all report the same result.
-- **Marking a state as a trap state changes how strings are evaluated** rather than being derived
-  from the transition function, so it can disagree with the diagram.
-- **The help panel does not scroll**, so its last few lines are not reachable.
+- **The symbol palette and the automaton's alphabet are separate.** Loading a file adds its
+  symbols to the palette, but the two are not otherwise kept in step.
 - No NFA, ε-transitions, minimisation, equivalence checking, or regular-expression conversion yet.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+ruff check .      # lint
+mypy              # type check
+pytest            # tests, headless
+```
+
+The test suite includes `tests/conformance/cases.json`: a specification of DFA semantics where
+every expected verdict and run was computed by hand from the transition function rather than
+recorded from the implementation. Cases the simulator currently gets wrong are marked and run as
+strict expected-failures, so fixing one turns it green and CI notices if a defect disappears
+without the marker being removed.
+
+`core/` must not import pygame — the automaton model has to stay usable without a display. CI
+enforces this.
 
 ## Roadmap
 
-In rough order: fix the crashes and make save/load round-trip; extract a tested, Pygame-free
-automata engine; add a CLI and DOT/TikZ/SVG export; explain *why* a string was rejected; undo;
-then minimisation, equivalence checking with counterexamples, and NFA support.
+In rough order: give every input event a single owner (fixing shift+click, right-click coverage,
+and help scrolling); extract a tested, Pygame-free automata engine and derive trap states from the
+transition function instead of a flag; add a CLI and DOT/TikZ/SVG export; explain *why* a string
+was rejected; undo; then minimisation, equivalence checking with counterexamples, and NFA support.
 
 ## License
 
