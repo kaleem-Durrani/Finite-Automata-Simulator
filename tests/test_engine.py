@@ -564,12 +564,60 @@ def test_engine_imports_without_pygame():
 
 
 def test_engine_uses_only_the_standard_library():
-    """No third-party import may appear anywhere in the engine."""
+    """No third-party import may appear anywhere in the engine.
+
+    Parses the import statements rather than searching the text. A substring
+    search matches the engine's own docstrings, which explain this very rule --
+    the first version of this check reported the documentation as a violation.
+    """
+    import ast
     import pathlib
 
-    banned = ("pygame", "networkx", "numpy", "automata", "frozendict")
+    banned = {"pygame", "networkx", "numpy", "automata", "frozendict"}
     engine = pathlib.Path(fsa.__file__).parent
-    for module in engine.glob("*.py"):
-        source = module.read_text(encoding="utf-8")
-        for name in banned:
-            assert f"import {name}" not in source, f"{module.name} imports {name}"
+
+    offenders = []
+    for module in engine.rglob("*.py"):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                if name.split(".")[0] in banned:
+                    offenders.append(f"{module.name}:{node.lineno} imports {name}")
+
+    assert offenders == [], offenders
+
+
+def test_the_import_guard_would_catch_a_real_violation():
+    """The guard above only means something if it can fail.
+
+    Feeds it a module that imports pygame in each of the two syntaxes, and one
+    that merely mentions the word in a docstring, and checks it tells them
+    apart.
+    """
+    import ast
+
+    def imports_banned(source: str) -> bool:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            if any(name.split(".")[0] == "pygame" for name in names):
+                return True
+        return False
+
+    assert imports_banned("import pygame")
+    assert imports_banned("import pygame.draw as draw")
+    assert imports_banned("from pygame import Rect")
+    assert imports_banned("def f():\n    import pygame\n")
+    assert not imports_banned('"""This module never imports pygame."""')
+    assert not imports_banned("# pygame is deliberately not used here")

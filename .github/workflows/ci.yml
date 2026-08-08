@@ -52,13 +52,34 @@ jobs:
       # The engine has to stay usable without a display, and dependency-free.
       # This is the architectural boundary stated as a build failure rather
       # than as a convention.
+      #
+      # Parses the import statements rather than grepping for the word: the
+      # engine's own docstrings explain the rule, and a plain grep flagged
+      # those as violations.
       - name: Engine must not depend on pygame
         run: |
-          if grep -rn "pygame" src/fsa/ core/; then
-            echo "::error::pygame referenced in the engine -- it must stay display-free"
-            exit 1
-          fi
-          echo "engine is pygame-free"
+          python - <<'PY'
+          import ast, pathlib, sys
+          banned = {"pygame", "networkx", "numpy", "automata", "frozendict"}
+          bad = []
+          for path in list(pathlib.Path("src/fsa").rglob("*.py")) + list(pathlib.Path("core").rglob("*.py")):
+              tree = ast.parse(path.read_text(encoding="utf-8"))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      names = [alias.name for alias in node.names]
+                  elif isinstance(node, ast.ImportFrom):
+                      names = [node.module or ""]
+                  else:
+                      continue
+                  for name in names:
+                      if name.split(".")[0] in banned:
+                          bad.append(f"{path}:{node.lineno} imports {name}")
+          if bad:
+              print("::error::the engine must stay display-free and dependency-free")
+              print("\n".join(bad))
+              sys.exit(1)
+          print("engine imports nothing outside the standard library")
+          PY
 
       - name: Engine must import with no third-party packages available
         run: |
