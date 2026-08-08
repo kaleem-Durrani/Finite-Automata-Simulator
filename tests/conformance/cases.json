@@ -1,0 +1,202 @@
+{
+  "_comment": [
+    "Executable specification of DFA semantics.",
+    "",
+    "Every expected verdict and path here is computed by hand from the",
+    "transition function, NOT recorded from what the implementation does. Cases",
+    "the current implementation gets wrong are marked with 'known_wrong' and run",
+    "as strict xfail, so fixing the implementation turns them green and CI fails",
+    "if one starts passing without the marker being removed.",
+    "",
+    "Verdicts use the five-way vocabulary the engine will expose. The current",
+    "DFA only returns a bool, so the runner checks accept-vs-reject and the",
+    "path; the finer verdict is asserted once the engine lands."
+  ],
+
+  "automata": {
+    "a_star_b_plus": {
+      "description": "a*b+ : any number of a's then at least one b. The demo automaton.",
+      "alphabet": ["a", "b"],
+      "initial": "q0",
+      "accept": ["q1"],
+      "dead_end": ["q2"],
+      "transitions": [
+        ["q0", "a", "q0"], ["q0", "b", "q1"],
+        ["q1", "a", "q2"], ["q1", "b", "q1"],
+        ["q2", "a", "q2"], ["q2", "b", "q2"]
+      ]
+    },
+
+    "trap_then_accept": {
+      "description": "A state flagged dead_end that nonetheless leads to an accepting state. Isolates the DEAD_END defect.",
+      "alphabet": ["a"],
+      "initial": "q0",
+      "accept": ["q2"],
+      "dead_end": ["q1"],
+      "transitions": [
+        ["q0", "a", "q1"], ["q1", "a", "q2"], ["q2", "a", "q2"]
+      ]
+    },
+
+    "partial": {
+      "description": "Incomplete transition function: delta is undefined for most (state, symbol) pairs.",
+      "alphabet": ["a", "b"],
+      "initial": "q0",
+      "accept": ["q1"],
+      "dead_end": [],
+      "transitions": [["q0", "a", "q1"]]
+    },
+
+    "accepts_empty": {
+      "description": "Single accepting state with a self loop: recognises a*.",
+      "alphabet": ["a"],
+      "initial": "q0",
+      "accept": ["q0"],
+      "dead_end": [],
+      "transitions": [["q0", "a", "q0"]]
+    },
+
+    "no_initial": {
+      "description": "No initial state. The language is undefined, not empty.",
+      "alphabet": ["a"],
+      "initial": null,
+      "accept": ["q0"],
+      "dead_end": [],
+      "transitions": []
+    },
+
+    "even_zeros": {
+      "description": "Even number of 0s over {0,1}. Total, and accepts the empty word.",
+      "alphabet": ["0", "1"],
+      "initial": "e",
+      "accept": ["e"],
+      "dead_end": [],
+      "transitions": [
+        ["e", "0", "o"], ["e", "1", "e"],
+        ["o", "0", "e"], ["o", "1", "o"]
+      ]
+    },
+
+    "rejects_all": {
+      "description": "Total transition function, no accepting states: recognises the empty language.",
+      "alphabet": ["a", "b"],
+      "initial": "q0",
+      "accept": [],
+      "dead_end": [],
+      "transitions": [["q0", "a", "q0"], ["q0", "b", "q0"]]
+    },
+
+    "sink_no_outgoing": {
+      "description": "Accepting state with no outgoing edges at all.",
+      "alphabet": ["a"],
+      "initial": "q0",
+      "accept": ["q1"],
+      "dead_end": [],
+      "transitions": [["q0", "a", "q1"]]
+    }
+  },
+
+  "cases": [
+    { "id": "ab-empty", "automaton": "a_star_b_plus", "word": "",
+      "verdict": "reject_non_accepting", "path": ["q0"],
+      "note": "epsilon: the run is the initial state alone" },
+    { "id": "ab-a", "automaton": "a_star_b_plus", "word": "a",
+      "verdict": "reject_non_accepting", "path": ["q0", "q0"] },
+    { "id": "ab-b", "automaton": "a_star_b_plus", "word": "b",
+      "verdict": "accept", "path": ["q0", "q1"] },
+    { "id": "ab-ab", "automaton": "a_star_b_plus", "word": "ab",
+      "verdict": "accept", "path": ["q0", "q0", "q1"] },
+    { "id": "ab-aa", "automaton": "a_star_b_plus", "word": "aa",
+      "verdict": "reject_non_accepting", "path": ["q0", "q0", "q0"] },
+    { "id": "ab-ba", "automaton": "a_star_b_plus", "word": "ba",
+      "verdict": "reject_non_accepting", "path": ["q0", "q1", "q2"] },
+    { "id": "ab-bb", "automaton": "a_star_b_plus", "word": "bb",
+      "verdict": "accept", "path": ["q0", "q1", "q1"] },
+    { "id": "ab-aab", "automaton": "a_star_b_plus", "word": "aab",
+      "verdict": "accept", "path": ["q0", "q0", "q0", "q1"] },
+    { "id": "ab-bbb", "automaton": "a_star_b_plus", "word": "bbb",
+      "verdict": "accept", "path": ["q0", "q1", "q1", "q1"] },
+    { "id": "ab-aaaa", "automaton": "a_star_b_plus", "word": "aaaa",
+      "verdict": "reject_non_accepting", "path": ["q0", "q0", "q0", "q0", "q0"] },
+    { "id": "ab-aba", "automaton": "a_star_b_plus", "word": "aba",
+      "verdict": "reject_non_accepting", "path": ["q0", "q0", "q1", "q2"],
+      "note": "the trap is entered on the final symbol, so no run is truncated" },
+
+    { "id": "ab-abab", "automaton": "a_star_b_plus", "word": "abab",
+      "verdict": "reject_non_accepting", "path": ["q0", "q0", "q1", "q2", "q2"],
+      "known_wrong": "DEAD_END halts the run at q2, so the reported path is one state short" },
+    { "id": "ab-bab", "automaton": "a_star_b_plus", "word": "bab",
+      "verdict": "reject_non_accepting", "path": ["q0", "q1", "q2", "q2"],
+      "known_wrong": "DEAD_END halts the run at q2, so the reported path is one state short" },
+
+    { "id": "ab-symbol-only", "automaton": "a_star_b_plus", "word": "z",
+      "verdict": "reject_symbol_not_in_alphabet", "path": ["q0"] },
+    { "id": "ab-symbol-mid", "automaton": "a_star_b_plus", "word": "abz",
+      "verdict": "reject_symbol_not_in_alphabet", "path": ["q0", "q0", "q1"] },
+    { "id": "ab-symbol-first", "automaton": "a_star_b_plus", "word": "za",
+      "verdict": "reject_symbol_not_in_alphabet", "path": ["q0"] },
+
+    { "id": "trap-a", "automaton": "trap_then_accept", "word": "a",
+      "verdict": "reject_non_accepting", "path": ["q0", "q1"],
+      "note": "halts in q1, which is not accepting -- correct for the right reason" },
+    { "id": "trap-aa", "automaton": "trap_then_accept", "word": "aa",
+      "verdict": "accept", "path": ["q0", "q1", "q2"],
+      "known_wrong": "delta says q1 -a-> q2 and q2 accepts, but the DEAD_END flag on q1 halts the run and rejects" },
+    { "id": "trap-aaa", "automaton": "trap_then_accept", "word": "aaa",
+      "verdict": "accept", "path": ["q0", "q1", "q2", "q2"],
+      "known_wrong": "same: a user-set flag overrides the transition function" },
+
+    { "id": "partial-empty", "automaton": "partial", "word": "",
+      "verdict": "reject_non_accepting", "path": ["q0"] },
+    { "id": "partial-a", "automaton": "partial", "word": "a",
+      "verdict": "accept", "path": ["q0", "q1"] },
+    { "id": "partial-b", "automaton": "partial", "word": "b",
+      "verdict": "reject_no_transition", "path": ["q0"],
+      "note": "b is in the alphabet but delta(q0,b) is undefined" },
+    { "id": "partial-aa", "automaton": "partial", "word": "aa",
+      "verdict": "reject_no_transition", "path": ["q0", "q1"] },
+    { "id": "partial-ab", "automaton": "partial", "word": "ab",
+      "verdict": "reject_no_transition", "path": ["q0", "q1"] },
+
+    { "id": "empty-accepted", "automaton": "accepts_empty", "word": "",
+      "verdict": "accept", "path": ["q0"],
+      "note": "the initial state is accepting, so epsilon is in the language" },
+    { "id": "empty-a", "automaton": "accepts_empty", "word": "a",
+      "verdict": "accept", "path": ["q0", "q0"] },
+    { "id": "empty-aaa", "automaton": "accepts_empty", "word": "aaa",
+      "verdict": "accept", "path": ["q0", "q0", "q0", "q0"] },
+
+    { "id": "noinit-empty", "automaton": "no_initial", "word": "",
+      "verdict": "no_initial_state", "path": [] },
+    { "id": "noinit-a", "automaton": "no_initial", "word": "a",
+      "verdict": "no_initial_state", "path": [] },
+
+    { "id": "even-empty", "automaton": "even_zeros", "word": "",
+      "verdict": "accept", "path": ["e"] },
+    { "id": "even-0", "automaton": "even_zeros", "word": "0",
+      "verdict": "reject_non_accepting", "path": ["e", "o"] },
+    { "id": "even-1", "automaton": "even_zeros", "word": "1",
+      "verdict": "accept", "path": ["e", "e"] },
+    { "id": "even-00", "automaton": "even_zeros", "word": "00",
+      "verdict": "accept", "path": ["e", "o", "e"] },
+    { "id": "even-11", "automaton": "even_zeros", "word": "11",
+      "verdict": "accept", "path": ["e", "e", "e"] },
+    { "id": "even-000", "automaton": "even_zeros", "word": "000",
+      "verdict": "reject_non_accepting", "path": ["e", "o", "e", "o"] },
+    { "id": "even-0101", "automaton": "even_zeros", "word": "0101",
+      "verdict": "accept", "path": ["e", "o", "o", "e", "e"] },
+    { "id": "even-0110", "automaton": "even_zeros", "word": "0110",
+      "verdict": "accept", "path": ["e", "o", "o", "o", "e"] },
+
+    { "id": "none-empty", "automaton": "rejects_all", "word": "",
+      "verdict": "reject_non_accepting", "path": ["q0"] },
+    { "id": "none-abab", "automaton": "rejects_all", "word": "abab",
+      "verdict": "reject_non_accepting", "path": ["q0", "q0", "q0", "q0", "q0"] },
+
+    { "id": "sink-a", "automaton": "sink_no_outgoing", "word": "a",
+      "verdict": "accept", "path": ["q0", "q1"] },
+    { "id": "sink-aa", "automaton": "sink_no_outgoing", "word": "aa",
+      "verdict": "reject_no_transition", "path": ["q0", "q1"],
+      "note": "q1 has no outgoing edges at all" }
+  ]
+}
