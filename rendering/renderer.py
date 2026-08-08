@@ -1,341 +1,346 @@
-"""
-Renderer module for drawing automaton components.
+"""Paints a Scene.
 
-This module handles all rendering operations including states, transitions,
-and UI elements with proper resource management and optimization.
+Knows about pixels, the camera and the theme. Knows nothing about automata:
+everything it draws arrives as a :class:`~rendering.scene.Scene` of plain
+geometry, so the model underneath can change without touching this file.
+
+Draw order is three passes -- edges, then nodes, then every label. The previous
+renderer drew each edge's label during the edge pass, so the next node painted
+over it; transition labels were routinely buried under the states they
+connected.
 """
 
 import math
-from typing import Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import pygame
 
 from core.camera import Camera
-from core.state import State, StateType
+from rendering import geometry, primitives
+from rendering.fonts import FontBook
+from rendering.scene import EdgeVisual, NodeKind, NodeVisual, Scene
+from rendering.theme import Theme
+
+Point = Tuple[float, float]
+
+# World-space size of a state, before zoom.
+STATE_RADIUS = 30.0
+# How far outside the window a node may be before it is skipped.
+CULL_MARGIN = 140.0
+
+
+def _mix(a: Sequence[int], b: Sequence[int], t: float) -> Tuple[int, int, int]:
+    """Blend two colours. Used to interpolate along an animated value."""
+    t = max(0.0, min(1.0, t))
+    return (
+        int(a[0] + (b[0] - a[0]) * t),
+        int(a[1] + (b[1] - a[1]) * t),
+        int(a[2] + (b[2] - a[2]) * t),
+    )
 
 
 class Renderer:
-    """
-    Handles all rendering operations with proper resource management.
-    
-    The renderer manages drawing of states, transitions, and provides
-    efficient rendering with camera transformations.
-    """
-    
-    def __init__(self, screen: pygame.Surface):
-        """
-        Initialize the renderer.
-        
-        Args:
-            screen: Pygame surface to render to
-        """
+    """Draws the workspace."""
+
+    def __init__(self, screen: pygame.Surface, theme: Optional[Theme] = None,
+                 fonts: Optional[FontBook] = None):
         self.screen = screen
         self.camera = Camera(screen.get_width(), screen.get_height())
-        
-        # Load and cache fonts to avoid repeated loading
-        self.fonts = {
-            'small': pygame.font.Font(None, 16),
-            'medium': pygame.font.Font(None, 24),
-            'large': pygame.font.Font(None, 32)
-        }
-        
-        # Color palette for consistent theming
-        self.colors = {
-            'background': (240, 240, 240),      # Light gray background
-            'state_normal': (100, 150, 255),    # Blue for normal states
-            'state_accept': (100, 255, 100),    # Green for accept states
-            'state_dead_end': (255, 100, 100),  # Red for dead end states
-            'state_selected': (255, 255, 100),  # Yellow for selected states
-            'state_hover': (200, 200, 255),     # Light blue for hover
-            'state_executing': (255, 150, 0),   # Orange for execution highlight
-            'transition_a': (255, 50, 50),      # Red for 'a' transitions
-            'transition_b': (150, 50, 255),     # Purple for 'b' transitions
-            'transition_other': (50, 50, 50),   # Dark gray for other symbols
-            'transition_creating': (100, 100, 100),  # Gray for transition being created
-            'text': (0, 0, 0),                  # Black text
-            'ui_background': (220, 220, 220),   # UI panel background
-            'ui_border': (100, 100, 100)        # UI border color
-        }
-        
-    def clear(self):
-        """Clear the screen with background color."""
-        self.screen.fill(self.colors['background'])
-    
-    def draw_state(self, state: State, is_executing: bool = False):
+        self.theme = theme or Theme("dark")
+        self.fonts = fonts or FontBook()
+
+    # ------------------------------------------------------------------
+    # Frame
+    # ------------------------------------------------------------------
+
+    def update_screen_size(self, width: int, height: int) -> None:
+        """Track a resized window.
+
+        Also rebinds the surface. The old version updated only the camera and
+        left ``self.screen`` pointing at the pre-resize surface.
         """
-        Draw a single state with appropriate styling.
-        
-        Args:
-            state: State object to draw
-            is_executing: Whether this state is currently being executed
-        """
-        screen_pos = self.camera.world_to_screen(state.position)
-        radius = int(state.radius * self.camera.zoom)
-        
-        # Don't draw very small states (performance optimization)
-        if radius < 2:
-            return
-            
-        # Choose color based on state type and status
-        if is_executing:
-            color = self.colors['state_executing']
-        elif state.selected:
-            color = self.colors['state_selected']
-        elif state.hover:
-            color = self.colors['state_hover']
-        elif state.state_type == StateType.ACCEPT:
-            color = self.colors['state_accept']
-        elif state.state_type == StateType.DEAD_END:
-            color = self.colors['state_dead_end']
-        else:
-            color = self.colors['state_normal']
-        
-        # Draw main circle
-        center = (int(screen_pos[0]), int(screen_pos[1]))
-        pygame.draw.circle(self.screen, color, center, radius)
-        pygame.draw.circle(self.screen, (0, 0, 0), center, radius, 2)
-        
-        # Draw accept state indicator (double circle)
-        if state.state_type == StateType.ACCEPT:
-            inner_radius = max(2, radius - 8)
-            pygame.draw.circle(self.screen, (0, 0, 0), center, inner_radius, 2)
-        
-        # Draw state label if state is large enough
-        if radius > 10:
-            text_surface = self.fonts['small'].render(state.id, True, self.colors['text'])
-            text_rect = text_surface.get_rect(center=center)
-            self.screen.blit(text_surface, text_rect)
-
-    def draw_current_state_indicator(self, state_position: Tuple[float, float]):
-        """Draw an arrow pointing to the current state during execution."""
-        screen_pos = self.camera.world_to_screen(state_position)
-
-        # Draw arrow pointing down to the state
-        arrow_tip = (screen_pos[0], screen_pos[1] - 60)
-        arrow_base = (screen_pos[0], screen_pos[1] - 80)
-        arrow_left = (screen_pos[0] - 10, screen_pos[1] - 70)
-        arrow_right = (screen_pos[0] + 10, screen_pos[1] - 70)
-
-        # Draw arrow
-        pygame.draw.line(self.screen, (255, 255, 0), arrow_base, arrow_tip, 3)
-        pygame.draw.line(self.screen, (255, 255, 0), arrow_tip, arrow_left, 3)
-        pygame.draw.line(self.screen, (255, 255, 0), arrow_tip, arrow_right, 3)
-
-        # Draw "Current" label
-        label_surface = self.fonts['small'].render("Current", True, (255, 255, 0))
-        label_rect = label_surface.get_rect(center=(screen_pos[0], screen_pos[1] - 95))
-
-        # Draw background for label
-        bg_rect = label_rect.inflate(10, 4)
-        pygame.draw.rect(self.screen, (0, 0, 0), bg_rect)
-        pygame.draw.rect(self.screen, (255, 255, 0), bg_rect, 1)
-
-        self.screen.blit(label_surface, label_rect)
-    
-    def draw_arrow(self, start_pos: Tuple[float, float], end_pos: Tuple[float, float], 
-                   color: Tuple[int, int, int], label: str = "", is_self_loop: bool = False,
-                   arc_offset: float = 0.0):
-        """
-        Draw an arrow between two points with optional label and arc.
-        
-        Args:
-            start_pos: Starting position in world coordinates
-            end_pos: Ending position in world coordinates
-            color: RGB color tuple for the arrow
-            label: Text label to display on the arrow
-            is_self_loop: Whether this is a self-referencing transition
-            arc_offset: Offset for creating curved arrows (positive = curve up)
-        """
-        start_screen = self.camera.world_to_screen(start_pos)
-        end_screen = self.camera.world_to_screen(end_pos)
-        
-        if is_self_loop:
-            self._draw_self_loop(start_screen, color, label)
-            return
-        
-        # Calculate arrow properties
-        dx = end_screen[0] - start_screen[0]
-        dy = end_screen[1] - start_screen[1]
-        distance = math.sqrt(dx * dx + dy * dy)
-        
-        if distance < 1:  # Too short to draw
-            return
-            
-        # Normalize direction
-        dx /= distance
-        dy /= distance
-        
-        # Adjust start and end points to be on circle edges
-        radius = 30 * self.camera.zoom
-        start_adjusted = (start_screen[0] + dx * radius, start_screen[1] + dy * radius)
-        end_adjusted = (end_screen[0] - dx * radius, end_screen[1] - dy * radius)
-        
-        # Apply arc offset for curved arrows
-        if abs(arc_offset) > 0.01:
-            self._draw_curved_arrow(start_adjusted, end_adjusted, color, label, arc_offset)
-        else:
-            self._draw_straight_arrow(start_adjusted, end_adjusted, color, label)
-    
-    def _draw_straight_arrow(self, start: Tuple[float, float], end: Tuple[float, float],
-                           color: Tuple[int, int, int], label: str):
-        """Draw a straight arrow between two points."""
-        # Draw line
-        pygame.draw.line(self.screen, color, start, end, 2)
-        
-        # Draw arrowhead
-        self._draw_arrowhead(start, end, color)
-        
-        # Draw label at midpoint
-        if label and self.camera.zoom > 0.5:
-            self._draw_arrow_label(start, end, label)
-    
-    def _draw_curved_arrow(self, start: Tuple[float, float], end: Tuple[float, float],
-                          color: Tuple[int, int, int], label: str, arc_offset: float):
-        """Draw a curved arrow using quadratic Bezier curve."""
-        # Calculate control point for the curve
-        mid_x = (start[0] + end[0]) / 2
-        mid_y = (start[1] + end[1]) / 2
-        
-        # Perpendicular offset for curve
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.sqrt(dx * dx + dy * dy)
-        
-        if length > 0:
-            # Perpendicular vector
-            perp_x = -dy / length
-            perp_y = dx / length
-            
-            # Control point with arc offset
-            control_x = mid_x + perp_x * arc_offset * self.camera.zoom
-            control_y = mid_y + perp_y * arc_offset * self.camera.zoom
-            
-            # Draw curve using multiple line segments
-            points = []
-            num_segments = max(10, int(length / 10))
-            
-            for i in range(num_segments + 1):
-                t = i / num_segments
-                # Quadratic Bezier formula
-                x = (1-t)**2 * start[0] + 2*(1-t)*t * control_x + t**2 * end[0]
-                y = (1-t)**2 * start[1] + 2*(1-t)*t * control_y + t**2 * end[1]
-                points.append((x, y))
-            
-            # Draw the curve
-            if len(points) > 1:
-                pygame.draw.lines(self.screen, color, False, points, 2)
-                
-                # Draw arrowhead at the end
-                if len(points) >= 2:
-                    second_last = points[-2]
-                    last = points[-1]
-                    self._draw_arrowhead(second_last, last, color)
-                
-                # Draw label at curve midpoint
-                if label and self.camera.zoom > 0.5:
-                    mid_point = points[len(points) // 2]
-                    self._draw_label_at_point(mid_point, label)
-    
-    def _draw_arrowhead(self, start: Tuple[float, float], end: Tuple[float, float],
-                       color: Tuple[int, int, int]):
-        """Draw an arrowhead at the end point."""
-        arrow_size = 10 * self.camera.zoom
-        
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.sqrt(dx * dx + dy * dy)
-        
-        if length > 0:
-            dx /= length
-            dy /= length
-            
-            angle = math.atan2(dy, dx)
-            
-            arrow_points = [
-                end,
-                (end[0] - arrow_size * math.cos(angle - 0.5),
-                 end[1] - arrow_size * math.sin(angle - 0.5)),
-                (end[0] - arrow_size * math.cos(angle + 0.5),
-                 end[1] - arrow_size * math.sin(angle + 0.5))
-            ]
-            pygame.draw.polygon(self.screen, color, arrow_points)
-
-    def _draw_arrow_label(self, start: Tuple[float, float], end: Tuple[float, float], label: str):
-        """Draw a label at the midpoint of an arrow."""
-        mid_x = (start[0] + end[0]) / 2
-        mid_y = (start[1] + end[1]) / 2
-
-        # Offset label slightly from line
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.sqrt(dx * dx + dy * dy)
-
-        if length > 0:
-            # Perpendicular offset
-            offset_x = -dy / length * 15
-            offset_y = dx / length * 15
-
-            label_pos = (mid_x + offset_x, mid_y + offset_y)
-            self._draw_label_at_point(label_pos, label)
-
-    def _draw_label_at_point(self, pos: Tuple[float, float], label: str):
-        """Draw a text label at a specific point with background."""
-        text_surface = self.fonts['small'].render(label, True, self.colors['text'])
-        text_rect = text_surface.get_rect(center=(int(pos[0]), int(pos[1])))
-
-        # Draw background for better readability
-        bg_rect = text_rect.inflate(4, 2)
-        pygame.draw.rect(self.screen, (255, 255, 255, 200), bg_rect)
-        pygame.draw.rect(self.screen, (0, 0, 0), bg_rect, 1)
-
-        self.screen.blit(text_surface, text_rect)
-
-    def _draw_self_loop(self, pos: Tuple[float, float], color: Tuple[int, int, int], label: str):
-        """Draw a self-loop arrow above a state."""
-        radius = 30 * self.camera.zoom
-        loop_radius = 20 * self.camera.zoom
-
-        # Draw arc above the state
-        center_x = pos[0]
-        center_y = pos[1] - radius - loop_radius
-
-        # Draw the loop as a circle
-        pygame.draw.circle(self.screen, color, (int(center_x), int(center_y)), int(loop_radius), 2)
-
-        # Draw arrowhead
-        arrow_size = 8 * self.camera.zoom
-        arrow_pos = (center_x + loop_radius * 0.7, center_y - loop_radius * 0.7)
-        arrow_points = [
-            arrow_pos,
-            (arrow_pos[0] - arrow_size, arrow_pos[1] - arrow_size * 0.5),
-            (arrow_pos[0] - arrow_size, arrow_pos[1] + arrow_size * 0.5)
-        ]
-        pygame.draw.polygon(self.screen, color, arrow_points)
-
-        # Draw label
-        if label and self.camera.zoom > 0.5:
-            label_pos = (center_x, center_y - loop_radius - 15)
-            self._draw_label_at_point(label_pos, label)
-
-    def draw_initial_state_arrow(self, state_pos: Tuple[float, float]):
-        """
-        Draw the arrow indicating the initial state.
-
-        Args:
-            state_pos: Position of the initial state in world coordinates
-        """
-        start_world = (state_pos[0] - 60, state_pos[1])
-        end_world = (state_pos[0] - 35, state_pos[1])
-
-        self.draw_arrow(start_world, end_world, (0, 0, 255), "start")
-
-    def update_screen_size(self, width: int, height: int):
-        """
-        Update the renderer when screen size changes.
-
-        Args:
-            width: New screen width
-            height: New screen height
-        """
+        self.screen = pygame.display.get_surface()
         self.camera.screen_width = width
         self.camera.screen_height = height
+
+    def clear(self) -> None:
+        """Fill the canvas and lay down the dot grid."""
+        palette = self.theme.palette
+        self.screen.fill(palette.canvas)
+
+        spacing = 48 * self.camera.zoom
+        origin = self.camera.world_to_screen((0.0, 0.0))
+        primitives.dot_grid(self.screen, palette.canvas_dot, spacing, origin,
+                            self.screen.get_size())
+
+    def draw_scene(self, scene: Scene) -> None:
+        """Paint a whole frame of the workspace."""
+        visible_edges = [edge for edge in scene.edges if self._edge_visible(edge)]
+        visible_nodes = [node for node in scene.nodes if self._node_visible(node)]
+
+        if scene.start_marker is not None:
+            self._draw_start_marker(scene.start_marker.path)
+
+        for edge in visible_edges:
+            self._draw_edge(edge)
+
+        if scene.ghost_edge is not None:
+            self._draw_ghost_edge(scene.ghost_edge)
+
+        for node in visible_nodes:
+            self._draw_node(node)
+
+        # Labels last, so nothing can be painted over them.
+        for edge in visible_edges:
+            self._draw_edge_label(edge)
+        for node in visible_nodes:
+            self._draw_node_label(node)
+
+        if scene.token is not None:
+            self._draw_token(scene.token)
+
+    # ------------------------------------------------------------------
+    # Culling
+    # ------------------------------------------------------------------
+
+    def _node_visible(self, node: NodeVisual) -> bool:
+        screen_pos = self.camera.world_to_screen(node.position)
+        margin = CULL_MARGIN + node.radius * self.camera.zoom
+        return primitives.on_screen(screen_pos, self.screen.get_size(), margin)
+
+    def _edge_visible(self, edge: EdgeVisual) -> bool:
+        """Keep an edge if any sampled point is near the window.
+
+        Culling is not only a performance measure: gfxdraw raises OverflowError
+        above a signed short, and at maximum zoom a far-off coordinate exceeds
+        that easily. Primitives clamp as well, so this is belt and braces.
+        """
+        if not edge.path:
+            return False
+        size = self.screen.get_size()
+        step = max(1, len(edge.path) // 6)
+        for point in list(edge.path)[::step] + [edge.path[-1]]:
+            if primitives.on_screen(self.camera.world_to_screen(point), size,
+                                    CULL_MARGIN):
+                return True
+        return False
+
+    def _to_screen(self, path: Sequence[Point]) -> List[Point]:
+        return [self.camera.world_to_screen(point) for point in path]
+
+    # ------------------------------------------------------------------
+    # Nodes
+    # ------------------------------------------------------------------
+
+    def _draw_node(self, node: NodeVisual) -> None:
+        palette = self.theme.palette
+        centre = self.camera.world_to_screen(node.position)
+        zoom = self.camera.zoom
+
+        # A brief swell as the state is entered, and a steady lift while active.
+        scale = 1.0 + 0.09 * node.settle + 0.04 * node.active
+        radius = node.radius * zoom * scale
+        if radius < 2:
+            return
+
+        if node.active > 0.01:
+            primitives.glow(self.screen, centre, radius,
+                            (*palette.active_glow[:3],
+                             int(palette.active_glow[3] * node.active)),
+                            spread=16 * zoom * node.active)
+
+        primitives.soft_shadow(self.screen, centre, radius, palette.shadow,
+                               spread=5 * max(0.6, zoom))
+
+        if node.kind is NodeKind.DEAD:
+            fill = palette.dead_fill
+            ring_color = palette.dead_ring
+        else:
+            fill = palette.state_fill
+            ring_color = palette.state_ring
+
+        if node.kind is NodeKind.UNREACHABLE:
+            ring_color = palette.unreachable_ring
+
+        # Interaction states blend on top, strongest last.
+        if node.hover > 0.01:
+            ring_color = _mix(ring_color, palette.hover_ring, node.hover)
+        if node.selected > 0.01:
+            ring_color = _mix(ring_color, palette.selected_ring, node.selected)
+        if node.active > 0.01:
+            ring_color = _mix(ring_color, palette.active_ring, node.active)
+            fill = _mix(fill, palette.active_glow[:3], 0.18 * node.active)
+
+        primitives.filled_circle(self.screen, centre, radius, fill)
+
+        weight = max(1.0, (1.8 + 1.4 * max(node.selected, node.active)) * min(2.0, zoom))
+        primitives.ring(self.screen, centre, radius, weight, ring_color)
+
+        if node.is_accept:
+            inner = max(3.0, radius * 0.78)
+            accept_color = palette.accept_ring
+            if node.kind is NodeKind.DEAD:
+                accept_color = palette.dead_ring
+            primitives.ring(self.screen, centre, inner,
+                            max(1.0, 1.6 * min(2.0, zoom)), accept_color)
+
+    def _draw_node_label(self, node: NodeVisual) -> None:
+        zoom = self.camera.zoom
+        if node.radius * zoom < 11:
+            return
+
+        palette = self.theme.palette
+        colour = (palette.dead_text if node.kind is NodeKind.DEAD
+                  else palette.state_text)
+        font = self.fonts.scaled("state", zoom)
+        surface = font.render(node.label, True, colour)
+        centre = self.camera.world_to_screen(node.position)
+        self.screen.blit(surface, surface.get_rect(
+            center=(int(centre[0]), int(centre[1]))))
+
+    # ------------------------------------------------------------------
+    # Edges
+    # ------------------------------------------------------------------
+
+    def _edge_color(self, edge: EdgeVisual) -> Tuple[int, int, int]:
+        palette = self.theme.palette
+        base = self.theme.edge_color(edge.color_index)
+        if edge.muted > 0.01:
+            base = _mix(base, palette.edge_muted, edge.muted)
+        if edge.active > 0.01:
+            base = _mix(base, palette.edge_active, edge.active)
+        return base
+
+    def _draw_edge(self, edge: EdgeVisual) -> None:
+        if len(edge.path) < 2:
+            return
+
+        path = self._to_screen(edge.path)
+        colour = self._edge_color(edge)
+        zoom = self.camera.zoom
+        width = max(1.2, (1.9 + 1.5 * edge.active) * min(2.2, zoom))
+
+        primitives.stroke_path(self.screen, path, width, colour)
+
+        if edge.show_arrowhead:
+            head = geometry.arrowhead(path, max(6.0, 11.0 * min(2.0, zoom)))
+            primitives.polygon(self.screen, head, colour)
+
+    def _draw_edge_label(self, edge: EdgeVisual) -> None:
+        zoom = self.camera.zoom
+        if not edge.label or zoom < 0.42:
+            return
+
+        palette = self.theme.palette
+        path = self._to_screen(edge.path)
+        anchor = geometry.label_anchor(path, -13.0 * min(1.6, zoom))
+
+        font = self.fonts.scaled("edge", zoom)
+        colour = palette.label_text
+        if edge.active > 0.01:
+            colour = _mix(colour, palette.edge_active, edge.active)
+        surface = font.render(edge.label, True, colour)
+        rect = surface.get_rect(center=(int(anchor[0]), int(anchor[1])))
+
+        # A plate behind the text so it stays readable where edges cross.
+        plate = rect.inflate(9, 5)
+        primitives.panel(self.screen, plate, palette.label_plate,
+                         radius=self.theme.radius.sm)
+        self.screen.blit(surface, rect)
+
+    def _draw_ghost_edge(self, ghost) -> None:
+        palette = self.theme.palette
+        path = self._to_screen(ghost.path)
+        colour = palette.accent if ghost.valid else palette.error
+        primitives.dashed_path(self.screen, path,
+                               max(1.5, 2.0 * min(2.0, self.camera.zoom)), colour)
+        head = geometry.arrowhead(path, max(6.0, 10.0 * min(2.0, self.camera.zoom)))
+        primitives.polygon(self.screen, head, colour)
+
+        if ghost.label:
+            font = self.fonts.scaled("edge", self.camera.zoom)
+            surface = font.render(ghost.label, True, colour)
+            anchor = geometry.label_anchor(path, -14.0)
+            rect = surface.get_rect(center=(int(anchor[0]), int(anchor[1])))
+            primitives.panel(self.screen, rect.inflate(9, 5), palette.label_plate,
+                             radius=self.theme.radius.sm)
+            self.screen.blit(surface, rect)
+
+    def _draw_start_marker(self, path: Sequence[Point]) -> None:
+        palette = self.theme.palette
+        screen_path = self._to_screen(path)
+        zoom = self.camera.zoom
+        primitives.stroke_path(self.screen, screen_path,
+                               max(1.4, 2.0 * min(2.0, zoom)), palette.text_muted)
+        head = geometry.arrowhead(screen_path, max(6.0, 10.0 * min(2.0, zoom)))
+        primitives.polygon(self.screen, head, palette.text_muted)
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+
+    def _draw_token(self, token) -> None:
+        """The read head: a bright dot with a fading tail behind it."""
+        palette = self.theme.palette
+        zoom = self.camera.zoom
+        radius = max(3.0, token.radius * zoom)
+
+        trail = self._to_screen(token.trail)
+        if len(trail) >= 2:
+            for i in range(len(trail) - 1):
+                t = (i + 1) / len(trail)
+                alpha = int(palette.token_trail[3] * t * token.intensity)
+                if alpha <= 2:
+                    continue
+                primitives.stroke_path(
+                    self.screen, [trail[i], trail[i + 1]],
+                    max(1.0, radius * 0.75 * t),
+                    (*palette.token_trail[:3], alpha))
+
+        centre = self.camera.world_to_screen(token.position)
+        primitives.glow(self.screen, centre, radius,
+                        (*palette.token[:3], int(90 * token.intensity)),
+                        layers=4, spread=radius * 1.6)
+        primitives.filled_circle(self.screen, centre, radius, palette.token)
+
+    # ------------------------------------------------------------------
+    # Camera helpers
+    # ------------------------------------------------------------------
+
+    def fit_to_bounds(self, bounds: Tuple[float, float, float, float],
+                      padding: float = 90.0) -> Tuple[float, Point]:
+        """Camera zoom and offset that frame the given world rectangle.
+
+        Returned rather than applied, so the caller can ease towards it instead
+        of snapping.
+        """
+        min_x, min_y, max_x, max_y = bounds
+        width = max(1.0, max_x - min_x)
+        height = max(1.0, max_y - min_y)
+
+        available_w = max(1.0, self.screen.get_width() - padding * 2)
+        available_h = max(1.0, self.screen.get_height() - padding * 2)
+        zoom = min(available_w / width, available_h / height)
+        zoom = max(self.camera.min_zoom, min(1.35, zoom))
+
+        centre_x = (min_x + max_x) / 2
+        centre_y = (min_y + max_y) / 2
+        offset_x = self.screen.get_width() / (2 * zoom) - centre_x
+        offset_y = self.screen.get_height() / (2 * zoom) - centre_y
+        return zoom, (offset_x, offset_y)
+
+
+def default_state_radius() -> float:
+    """The world radius of a state. One definition, used by app and renderer."""
+    return STATE_RADIUS
+
+
+def loop_angle_for(index: int) -> float:
+    """Where a self-loop should point, so adjacent loops do not overlap.
+
+    Cycles through up, upper-right, upper-left and so on rather than putting
+    every loop in the same place above its node.
+    """
+    offsets = (-math.pi / 2, -math.pi / 2 + 0.85, -math.pi / 2 - 0.85,
+               math.pi / 2, math.pi / 2 + 0.85, math.pi / 2 - 0.85)
+    return offsets[index % len(offsets)]

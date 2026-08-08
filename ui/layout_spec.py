@@ -35,8 +35,8 @@ STATUS_HEIGHT = 170
 STATUS_MARGIN = 12
 
 # Speed slider, inside the status panel
-SLIDER_SIZE = (120, 15)
-SLIDER_OFFSET = (10, 110)
+SLIDER_SIZE = (150, 16)
+SLIDER_OFFSET = (12, 140)
 SPEED_MIN_MS = 500
 SPEED_MAX_MS = 3000
 
@@ -44,8 +44,10 @@ SPEED_MAX_MS = 3000
 EXECUTION_WIDTH = 300
 EXECUTION_HEIGHT = 120
 
-# Input area (bottom left)
-INPUT_PANEL_SIZE = (560, 86)
+# Input area (bottom left). Tall enough for the caption, the field, and the
+# verdict badge with its explanation underneath -- the badge used to be drawn
+# past the bottom edge of its own panel.
+INPUT_PANEL_SIZE = (600, 118)
 INPUT_PANEL_MARGIN = 12
 
 # Help panel (centred)
@@ -63,6 +65,7 @@ class LayoutSpec:
     height: int
 
     toolbar: pygame.Rect
+    theme_button: pygame.Rect
     load_button: pygame.Rect
     save_button: pygame.Rect
     help_button: pygame.Rect
@@ -92,6 +95,7 @@ class LayoutSpec:
         help_button = pygame.Rect(width - step, TOOLBAR_BUTTON_Y, button_w, button_h)
         save_button = pygame.Rect(width - step * 2, TOOLBAR_BUTTON_Y, button_w, button_h)
         load_button = pygame.Rect(width - step * 3, TOOLBAR_BUTTON_Y, button_w, button_h)
+        theme_button = pygame.Rect(width - step * 4, TOOLBAR_BUTTON_Y, button_w, button_h)
 
         status_panel = pygame.Rect(
             width - STATUS_WIDTH - STATUS_MARGIN,
@@ -120,8 +124,8 @@ class LayoutSpec:
             min(panel_w, width - INPUT_PANEL_MARGIN * 2),
             panel_h,
         )
-        input_field = pygame.Rect(input_panel.x + 10, input_panel.y + 40, 200, 30)
-        test_button = pygame.Rect(input_field.right + 10, input_field.y, 80, 30)
+        input_field = pygame.Rect(input_panel.x + 12, input_panel.y + 34, 240, 34)
+        test_button = pygame.Rect(input_field.right + 10, input_field.y, 82, 34)
 
         help_w, help_h = HELP_PANEL_SIZE
         help_panel = pygame.Rect(
@@ -137,6 +141,7 @@ class LayoutSpec:
             width=width,
             height=height,
             toolbar=pygame.Rect(0, 0, width, TOOLBAR_HEIGHT),
+            theme_button=theme_button,
             load_button=load_button,
             save_button=save_button,
             help_button=help_button,

@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import pygame
 
 from core.dfa import DFA
+from rendering import primitives
+from rendering.fonts import FontBook
+from rendering.theme import Theme
 from ui.layout_spec import (
     HELP_LINE_HEIGHT,
     HELP_TITLE_HEIGHT,
@@ -81,23 +84,30 @@ class UIManager:
     and all user interface state management.
     """
     
-    def __init__(self, screen: pygame.Surface):
+    def __init__(self, screen: pygame.Surface, theme: Optional[Theme] = None,
+                 fonts: Optional[FontBook] = None):
         """
         Initialize the UI manager.
-        
+
         Args:
             screen: Pygame surface for rendering UI elements
+            theme: Shared design tokens. Shared rather than owned so that
+                switching palettes reaches the canvas and the panels together.
+            fonts: Shared, cached font faces.
         """
         self.screen = screen
         self.screen_width = screen.get_width()
         self.screen_height = screen.get_height()
-        
+        self.theme = theme or Theme("dark")
+        self.fonts = fonts or FontBook()
+
         # UI state management
         self.show_help = False
         self.show_tutorial = False
         self.input_text = ""
         self.input_active = False
         self.test_result = ""
+        self.test_verdict = ""
         self.selected_symbol = 'a'
         self.context_menu: Optional[ContextMenu] = None
         
@@ -121,25 +131,6 @@ class UIManager:
         # UI element rectangles
         self._setup_ui_elements()
         
-        # Fonts for different text sizes
-        self.font_small = pygame.font.Font(None, 20)
-        self.font_medium = pygame.font.Font(None, 24)
-        self.font_large = pygame.font.Font(None, 32)
-        
-        # Color scheme
-        self.colors = {
-            'ui_bg': (240, 240, 240),
-            'ui_border': (100, 100, 100),
-            'button_normal': (200, 200, 200),
-            'button_hover': (220, 220, 220),
-            'button_active': (180, 180, 180),
-            'text': (0, 0, 0),
-            'input_active': (255, 255, 255),
-            'input_inactive': (240, 240, 240),
-            'success': (0, 150, 0),
-            'error': (200, 0, 0)
-        }
-        
         # Input handling for backspace
         self.backspace_timer = 0
         self.backspace_repeat_delay = 500  # ms before repeat starts
@@ -156,10 +147,84 @@ class UIManager:
         # while it is actually drawn.
         self.execution_panel_visible = False
 
+    # Fonts and colours are read through the shared theme, so there is exactly
+    # one definition of "the colour of a border" in the application.
+    @property
+    def font_small(self) -> pygame.font.Font:
+        return self.fonts.ui("small")
+
+    @property
+    def font_medium(self) -> pygame.font.Font:
+        return self.fonts.ui("body")
+
+    @property
+    def font_large(self) -> pygame.font.Font:
+        return self.fonts.ui("title")
+
+    @property
+    def colors(self) -> Dict[str, Any]:
+        """Semantic names used by the drawing code, resolved from the theme.
+
+        Kept as a mapping so the call sites read the same as before, but with
+        no values of its own: changing a palette changes this.
+        """
+        palette = self.theme.palette
+        return {
+            'ui_bg': palette.panel,
+            'ui_raised': palette.panel_raised,
+            'ui_border': palette.border,
+            'ui_border_strong': palette.border_strong,
+            'button_normal': palette.control,
+            'button_hover': palette.control_hover,
+            'button_active': palette.control_active,
+            'text': palette.text,
+            'text_muted': palette.text_muted,
+            'text_faint': palette.text_faint,
+            'text_on_accent': palette.text_on_accent,
+            'accent': palette.accent,
+            'input_active': palette.field,
+            'input_inactive': palette.panel_raised,
+            'success': palette.success,
+            'error': palette.error,
+            'warning': palette.warning,
+        }
+
     def _setup_ui_elements(self):
         """Recompute every UI rectangle for the current window size."""
         self.layout = LayoutSpec.for_size(self.screen_width, self.screen_height)
         self._recompute_symbol_buttons()
+
+    # ------------------------------------------------------------------
+    # Small drawing helpers
+    # ------------------------------------------------------------------
+
+    def _button(self, rect: pygame.Rect, label: str, *, active: bool = False,
+                hovered: bool = False, accent: bool = False) -> None:
+        """Draw a labelled button in one of its three states."""
+        palette = self.theme.palette
+        if accent or active:
+            fill = palette.accent
+            text_color = palette.text_on_accent
+            border = palette.accent
+        elif hovered:
+            fill = palette.control_hover
+            text_color = palette.text
+            border = palette.border_strong
+        else:
+            fill = palette.control
+            text_color = palette.text
+            border = palette.border
+
+        primitives.panel(self.screen, rect, fill, radius=self.theme.radius.md,
+                         border=border)
+        surface = self.fonts.ui("body_strong").render(label, True, text_color)
+        self.screen.blit(surface, surface.get_rect(center=rect.center))
+
+    def _section_label(self, text: str, position: Tuple[int, int]) -> None:
+        """A small uppercase caption above a group of controls."""
+        surface = self.fonts.ui("small_strong").render(
+            text.upper(), True, self.theme.palette.text_faint)
+        self.screen.blit(surface, position)
 
     def _recompute_symbol_buttons(self):
         """
@@ -196,6 +261,10 @@ class UIManager:
     @property
     def load_button_rect(self) -> pygame.Rect:
         return self.layout.load_button
+
+    @property
+    def theme_button_rect(self) -> pygame.Rect:
+        return self.layout.theme_button
 
     @property
     def speed_slider_rect(self) -> pygame.Rect:
@@ -273,6 +342,7 @@ class UIManager:
             (self.layout.help_button, self._on_help_button),
             (self.layout.save_button, self._on_save_button),
             (self.layout.load_button, self._on_load_button),
+            (self.layout.theme_button, self._on_theme_button),
             (self.layout.test_button, self._on_test_button),
             (self.layout.input_field, self._on_input_field),
             (self.layout.speed_slider, self._on_speed_slider),
@@ -294,6 +364,9 @@ class UIManager:
 
     def _on_load_button(self, _pos) -> Dict[str, Any]:
         return {'load_automaton': True}
+
+    def _on_theme_button(self, _pos) -> Dict[str, Any]:
+        return {'toggle_theme': True}
 
     def _on_test_button(self, _pos) -> Dict[str, Any]:
         return {'test_string': self.input_text}
@@ -621,9 +694,8 @@ class UIManager:
 
     def _draw_modal_frame(self, width: int, height: int, title: str) -> pygame.Rect:
         """Dim the screen and draw an empty centred dialog box, returning it."""
-        overlay = pygame.Surface((self.screen_width, self.screen_height), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 120))
-        self.screen.blit(overlay, (0, 0))
+        palette = self.theme.palette
+        primitives.dim(self.screen, (0, 0, 0, 150 if palette.is_dark else 90))
 
         rect = pygame.Rect(
             (self.screen_width - width) // 2,
@@ -631,12 +703,14 @@ class UIManager:
             width,
             height,
         )
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], rect, 3)
+        primitives.soft_shadow(self.screen, rect.center, rect.width / 2,
+                               palette.shadow, layers=4, spread=10)
+        primitives.panel(self.screen, rect, palette.panel_raised,
+                         radius=self.theme.radius.lg, border=palette.border_strong)
 
-        title_surface = self.font_medium.render(title, True, self.colors['text'])
-        title_rect = title_surface.get_rect(centerx=rect.centerx, y=rect.y + 15)
-        self.screen.blit(title_surface, title_rect)
+        title_surface = self.fonts.ui("heading").render(title, True, palette.text)
+        self.screen.blit(title_surface, title_surface.get_rect(
+            centerx=rect.centerx, y=rect.y + self.theme.space.lg))
 
         return rect
 
@@ -645,28 +719,31 @@ class UIManager:
         verb = "Save as" if self.file_prompt_mode == 'save' else "Load file"
         rect = self._draw_modal_frame(440, 160, verb)
 
-        hint = self.font_small.render(
+        palette = self.theme.palette
+        hint = self.fonts.ui("small").render(
             "Relative to the project folder. '.json' is added if omitted.",
-            True, self.colors['text'])
-        self.screen.blit(hint, (rect.x + 20, rect.y + 48))
+            True, palette.text_muted)
+        self.screen.blit(hint, (rect.x + self.theme.space.lg, rect.y + 50))
 
-        field = pygame.Rect(rect.x + 20, rect.y + 72, rect.width - 40, 30)
-        pygame.draw.rect(self.screen, self.colors['input_active'], field)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], field, 2)
+        field = pygame.Rect(rect.x + self.theme.space.lg, rect.y + 74,
+                            rect.width - self.theme.space.lg * 2, 34)
+        primitives.panel(self.screen, field, palette.field,
+                         radius=self.theme.radius.md, border=palette.accent,
+                         border_width=2)
 
         # Show the tail of the text so the caret stays visible on long paths.
         shown = self.file_prompt_text[-40:]
-        text_surface = self.font_medium.render(shown, True, self.colors['text'])
+        text_surface = self.fonts.mono("input").render(shown, True, palette.text)
         text_rect = text_surface.get_rect(midleft=(field.left + 6, field.centery))
         self.screen.blit(text_surface, text_rect)
 
-        if pygame.time.get_ticks() % 1000 < 500:
-            caret_x = min(text_rect.right + 2, field.right - 4)
-            pygame.draw.line(self.screen, self.colors['text'],
-                             (caret_x, field.top + 5), (caret_x, field.bottom - 5), 2)
+        if pygame.time.get_ticks() % 1100 < 560:
+            caret_x = min(text_rect.right + 2, field.right - 5)
+            pygame.draw.line(self.screen, palette.accent,
+                             (caret_x, field.top + 7), (caret_x, field.bottom - 7), 2)
 
-        footer = self.font_small.render("Enter to confirm, Escape to cancel",
-                                        True, self.colors['text'])
+        footer = self.fonts.ui("small").render("Enter to confirm, Escape to cancel",
+                                               True, palette.text_faint)
         self.screen.blit(footer, footer.get_rect(centerx=rect.centerx,
                                                  y=rect.bottom - 26))
 
@@ -674,96 +751,124 @@ class UIManager:
         """Draw the yes/no confirmation dialog."""
         rect = self._draw_modal_frame(420, 130, "Unsaved changes")
 
-        message = self.font_medium.render(self.confirm_message, True, self.colors['text'])
-        self.screen.blit(message, message.get_rect(centerx=rect.centerx, y=rect.y + 55))
+        palette = self.theme.palette
+        message = self.fonts.ui("body").render(self.confirm_message, True,
+                                               palette.text_muted)
+        self.screen.blit(message, message.get_rect(centerx=rect.centerx, y=rect.y + 56))
 
-        footer = self.font_small.render("Y or Enter to confirm, N or Escape to cancel",
-                                        True, self.colors['text'])
+        footer = self.fonts.ui("small").render(
+            "Y or Enter to confirm, N or Escape to cancel", True, palette.text_faint)
         self.screen.blit(footer, footer.get_rect(centerx=rect.centerx,
                                                  y=rect.bottom - 30))
 
     def _draw_toolbar(self):
         """Draw the main toolbar at the top of the screen."""
-        toolbar_rect = self.layout.toolbar
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], toolbar_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], toolbar_rect, 2)
+        palette = self.theme.palette
+        toolbar = self.layout.toolbar
+        pygame.draw.rect(self.screen, palette.panel, toolbar)
+        pygame.draw.line(self.screen, palette.border,
+                         (0, toolbar.bottom - 1), (toolbar.right, toolbar.bottom - 1))
 
-        # Title
-        title_text = self.font_large.render("Finite Automata Simulator", True, self.colors['text'])
-        self.screen.blit(title_text, (20, 15))
+        title = self.fonts.ui("title").render("Finite Automata", True, palette.text)
+        self.screen.blit(title, title.get_rect(
+            midleft=(self.theme.space.lg, toolbar.centery)))
 
-        # Save button
-        pygame.draw.rect(self.screen, self.colors['button_normal'], self.save_button_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], self.save_button_rect, 2)
-        save_text = self.font_medium.render("Save", True, self.colors['text'])
-        save_text_rect = save_text.get_rect(center=self.save_button_rect.center)
-        self.screen.blit(save_text, save_text_rect)
+        subtitle = self.fonts.ui("small").render(
+            "simulator", True, palette.text_faint)
+        self.screen.blit(subtitle, subtitle.get_rect(
+            midleft=(self.theme.space.lg + title.get_width() + 8,
+                     toolbar.centery + 1)))
 
-        # Load button
-        pygame.draw.rect(self.screen, self.colors['button_normal'], self.load_button_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], self.load_button_rect, 2)
-        load_text = self.font_medium.render("Load", True, self.colors['text'])
-        load_text_rect = load_text.get_rect(center=self.load_button_rect.center)
-        self.screen.blit(load_text, load_text_rect)
-
-        # Help button
-        help_color = self.colors['button_active'] if self.show_help else self.colors['button_normal']
-        pygame.draw.rect(self.screen, help_color, self.help_button_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], self.help_button_rect, 2)
-
-        help_text = self.font_medium.render("Help", True, self.colors['text'])
-        help_text_rect = help_text.get_rect(center=self.help_button_rect.center)
-        self.screen.blit(help_text, help_text_rect)
+        mouse_pos = pygame.mouse.get_pos()
+        self._button(self.theme_button_rect,
+                     "Light" if self.theme.is_dark else "Dark",
+                     hovered=self.theme_button_rect.collidepoint(mouse_pos))
+        self._button(self.load_button_rect, "Load",
+                     hovered=self.load_button_rect.collidepoint(mouse_pos))
+        self._button(self.save_button_rect, "Save",
+                     hovered=self.save_button_rect.collidepoint(mouse_pos))
+        self._button(self.help_button_rect, "Help", active=self.show_help,
+                     hovered=self.help_button_rect.collidepoint(mouse_pos))
 
     def _draw_input_area(self, test_result: str):
         """Draw the input area for testing strings."""
+        palette = self.theme.palette
         panel = self.layout.input_panel
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], panel)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], panel, 2)
+        primitives.panel(self.screen, panel, palette.panel,
+                         radius=self.theme.radius.lg, border=palette.border)
 
-        # Input field
-        input_color = self.colors['input_active'] if self.input_active else self.colors['input_inactive']
-        pygame.draw.rect(self.screen, input_color, self.input_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], self.input_rect, 2)
+        self._section_label("Test a string",
+                            (panel.x + self.theme.space.md, panel.y + 10))
 
-        # Input text (show last 25 characters if too long)
-        display_text = self.input_text if len(self.input_text) <= 25 else self.input_text[-25:]
-        text_surface = self.font_medium.render(display_text, True, self.colors['text'])
-        text_rect = text_surface.get_rect(midleft=(self.input_rect.left + 5, self.input_rect.centery))
+        # Input field. Focus is shown with an accent ring rather than a colour
+        # change, which reads at a glance without moving anything.
+        field = self.input_rect
+        primitives.panel(self.screen, field, palette.field,
+                         radius=self.theme.radius.md,
+                         border=palette.accent if self.input_active else palette.border,
+                         border_width=2 if self.input_active else 1)
+
+        font = self.fonts.mono("input")
+        display_text = self.input_text if len(self.input_text) <= 22 else self.input_text[-22:]
+        if display_text:
+            text_surface = font.render(display_text, True, palette.text)
+        else:
+            text_surface = font.render("epsilon" if self.input_active else "type here",
+                                       True, palette.text_faint)
+        text_rect = text_surface.get_rect(
+            midleft=(field.left + self.theme.space.sm, field.centery))
         self.screen.blit(text_surface, text_rect)
 
-        # Cursor (blinking)
-        if self.input_active and pygame.time.get_ticks() % 1000 < 500:
-            cursor_x = text_rect.right + 2
-            cursor_y1 = self.input_rect.top + 5
-            cursor_y2 = self.input_rect.bottom - 5
-            pygame.draw.line(self.screen, self.colors['text'], (cursor_x, cursor_y1), (cursor_x, cursor_y2), 2)
+        if self.input_active and pygame.time.get_ticks() % 1100 < 560:
+            caret_x = (text_rect.right + 2) if display_text else (field.left + self.theme.space.sm)
+            pygame.draw.line(self.screen, palette.accent,
+                             (caret_x, field.top + 6), (caret_x, field.bottom - 6), 2)
 
-        # Test button with hover effect
         mouse_pos = pygame.mouse.get_pos()
-        button_color = (self.colors['button_hover'] if self.test_button_rect.collidepoint(mouse_pos)
-                        else self.colors['button_normal'])
-        pygame.draw.rect(self.screen, button_color, self.test_button_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], self.test_button_rect, 2)
+        self._button(self.test_button_rect, "Test", accent=True,
+                     hovered=self.test_button_rect.collidepoint(mouse_pos))
 
-        test_text = self.font_medium.render("Test", True, self.colors['text'])
-        test_text_rect = test_text.get_rect(center=self.test_button_rect.center)
-        self.screen.blit(test_text, test_text_rect)
-
-        # Label
-        label_text = self.font_medium.render("Test String:", True, self.colors['text'])
-        self.screen.blit(label_text, (panel.x + 10, panel.y + 12))
-
-        # Test result
         if test_result:
-            # Keyed on the end of the message, not a substring search. Matching
-            # "accepted" anywhere used to colour a rejection green whenever the
-            # word appeared in the user's own input.
-            result_color = (self.colors['success'] if test_result.endswith("ACCEPTED")
-                            else self.colors['error'])
-            result_text = self.font_small.render(test_result, True, result_color)
-            self.screen.blit(result_text, (self.test_button_rect.right + 15,
-                                           self.input_rect.centery - 7))
+            self._draw_verdict(test_result, panel)
+
+    def _draw_verdict(self, message: str, panel: pygame.Rect) -> None:
+        """Show the result of the last run, coloured by its verdict.
+
+        The colour comes from the verdict the engine reported, not from
+        searching the message for the word "accepted" -- which used to paint a
+        rejection green whenever that word appeared in the user's own input.
+        """
+        palette = self.theme.palette
+        if self.test_verdict == "accept":
+            color, mark = palette.success, "ACCEPTED"
+        elif self.test_verdict == "no_initial_state":
+            color, mark = palette.warning, "NO START STATE"
+        elif self.test_verdict:
+            color, mark = palette.error, "REJECTED"
+        else:
+            color, mark = palette.text_muted, ""
+
+        y = self.input_rect.bottom + 10
+        if mark:
+            badge_font = self.fonts.ui("small_strong")
+            badge_text = badge_font.render(mark, True, palette.text_on_accent)
+            badge = pygame.Rect(panel.x + self.theme.space.md, y,
+                                badge_text.get_width() + 14,
+                                badge_text.get_height() + 6)
+            primitives.panel(self.screen, badge, color, radius=self.theme.radius.sm)
+            self.screen.blit(badge_text, badge_text.get_rect(center=badge.center))
+            detail_x = badge.right + self.theme.space.sm
+        else:
+            detail_x = panel.x + self.theme.space.md
+
+        # The engine's own sentence, trimmed to the panel.
+        detail = message
+        surface = self.fonts.ui("small").render(detail, True, palette.text_muted)
+        available = panel.right - detail_x - self.theme.space.md
+        while surface.get_width() > available and len(detail) > 12:
+            detail = detail[:-4] + "..."
+            surface = self.fonts.ui("small").render(detail, True, palette.text_muted)
+        self.screen.blit(surface, (detail_x, y + 2))
 
     def _draw_alphabet_selector(self, _dfa: DFA):
         """Draw the alphabet selector with available symbols.
@@ -771,166 +876,190 @@ class UIManager:
         Reads the rectangles computed in _recompute_symbol_buttons rather than
         producing them as a side effect of drawing.
         """
+        palette = self.theme.palette
         panel = self.layout.symbol_panel
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], panel)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], panel, 2)
+        pygame.draw.rect(self.screen, palette.panel, panel)
+        pygame.draw.line(self.screen, palette.border,
+                         (0, panel.bottom - 1), (panel.right, panel.bottom - 1))
 
-        # Title
-        title_text = self.font_medium.render("Transition Symbols:", True, self.colors['text'])
-        self.screen.blit(title_text, (self.layout.symbol_row_origin[0], panel.y + 8))
+        self._section_label("Transition symbol",
+                            (self.layout.symbol_row_origin[0], panel.y + 8))
 
         mouse_pos = pygame.mouse.get_pos()
+        mono = self.fonts.mono("input")
 
-        for symbol, button_rect in self.symbol_buttons.items():
-            # Button color based on selection and hover
-            if symbol == self.selected_symbol:
-                button_color = self.colors['button_active']
-            elif button_rect.collidepoint(mouse_pos):
-                button_color = self.colors['button_hover']
+        for index, (symbol, button_rect) in enumerate(self.symbol_buttons.items()):
+            selected = symbol == self.selected_symbol
+            hovered = button_rect.collidepoint(mouse_pos)
+
+            if selected:
+                fill, text_color, border = (palette.accent, palette.text_on_accent,
+                                            palette.accent)
+            elif hovered:
+                fill, text_color, border = (palette.control_hover, palette.text,
+                                            palette.border_strong)
             else:
-                button_color = self.colors['button_normal']
+                fill, text_color, border = (palette.control, palette.text,
+                                            palette.border)
 
-            pygame.draw.rect(self.screen, button_color, button_rect)
-            pygame.draw.rect(self.screen, self.colors['ui_border'], button_rect, 2)
+            primitives.panel(self.screen, button_rect, fill,
+                             radius=self.theme.radius.md, border=border)
+            surface = mono.render(symbol, True, text_color)
+            self.screen.blit(surface, surface.get_rect(center=button_rect.center))
 
-            # Symbol text
-            symbol_text = self.font_medium.render(symbol, True, self.colors['text'])
-            symbol_text_rect = symbol_text.get_rect(center=button_rect.center)
-            self.screen.blit(symbol_text, symbol_text_rect)
+            # A hairline in this symbol's edge colour, tying the palette to the
+            # arrows it draws.
+            swatch = pygame.Rect(button_rect.x + 7, button_rect.bottom - 5,
+                                 button_rect.width - 14, 2)
+            pygame.draw.rect(self.screen, self.theme.edge_color(index), swatch,
+                             border_radius=1)
 
-        add_button_color = (self.colors['button_hover'] if
-                           self.add_symbol_button_rect.collidepoint(mouse_pos) else
-                           self.colors['button_normal'])
-
-        pygame.draw.rect(self.screen, add_button_color, self.add_symbol_button_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], self.add_symbol_button_rect, 2)
-
-        add_text = self.font_medium.render("+", True, self.colors['text'])
-        add_text_rect = add_text.get_rect(center=self.add_symbol_button_rect.center)
-        self.screen.blit(add_text, add_text_rect)
+        add_rect = self.add_symbol_button_rect
+        self._button(add_rect, "+", hovered=add_rect.collidepoint(mouse_pos))
 
     def _draw_status_info(self, dfa: DFA):
         """Draw status information about the current automaton."""
+        palette = self.theme.palette
         panel_rect = self.layout.status_panel
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], panel_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], panel_rect, 2)
+        primitives.panel(self.screen, panel_rect, palette.panel,
+                         radius=self.theme.radius.lg, border=palette.border)
 
-        info_x = panel_rect.x + 10
-        info_y = panel_rect.y + 10
+        info_x = panel_rect.x + self.theme.space.md
+        info_y = panel_rect.y + self.theme.space.md
+        value_x = info_x + 92
 
-        # Status information
-        status_lines = [
-            f"States: {len(dfa.states)}",
-            f"Alphabet: {', '.join(sorted(dfa.alphabet)) if dfa.alphabet else 'None'}",
-            f"Initial: {dfa.initial_state or 'None'}",
-            f"Accept: {len(dfa.accept_states)}"
+        self._section_label("Automaton", (info_x, info_y))
+
+        rows = [
+            ("States", str(len(dfa.states))),
+            ("Alphabet", ", ".join(sorted(dfa.alphabet)) if dfa.alphabet else "empty"),
+            ("Start", dfa.initial_state or "none"),
+            ("Accepting", str(len(dfa.accept_states))),
         ]
 
-        for i, line in enumerate(status_lines):
-            text_surface = self.font_small.render(line, True, self.colors['text'])
-            self.screen.blit(text_surface, (info_x, info_y + i * 20))
+        label_font = self.fonts.ui("small")
+        value_font = self.fonts.ui("small_strong")
+        row_y = info_y + 20
+        for label, value in rows:
+            self.screen.blit(label_font.render(label, True, palette.text_muted),
+                             (info_x, row_y))
+            colour = palette.text if value not in ("none", "empty") else palette.text_faint
+            surface = value_font.render(value, True, colour)
+            available = panel_rect.right - value_x - self.theme.space.md
+            while surface.get_width() > available and len(value) > 4:
+                value = value[:-4] + "..."
+                surface = value_font.render(value, True, colour)
+            self.screen.blit(surface, (value_x, row_y))
+            row_y += 19
 
-        # Add animation controls to the status box
-        self._draw_animation_controls_in_status(info_x, info_y + len(status_lines) * 20 + 10)
+        self._draw_animation_controls_in_status(info_x, row_y + 8)
 
     def _draw_animation_controls_in_status(self, x: int, y: int):
-        """Draw animation controls inside the status box."""
-        # Animation status
+        """Playback speed, inside the status panel."""
+        palette = self.theme.palette
         animating = getattr(self, '_animation_active', False)
-        status_text = "Animation: ON" if animating else "Animation: OFF"
-        status_color = self.colors['success'] if animating else self.colors['error']
-        status_surface = self.font_small.render(status_text, True, status_color)
-        self.screen.blit(status_surface, (x, y))
 
-        # Speed slider. The rectangle comes from the layout so that the handle
-        # can be grabbed before the panel has been drawn once.
-        slider_rect = self.layout.speed_slider
-        slider_width = slider_rect.width
-        slider_y = slider_rect.y
-
-        # Draw slider background
-        pygame.draw.rect(self.screen, self.colors['ui_border'], slider_rect)
-        pygame.draw.rect(self.screen, self.colors['input_inactive'], slider_rect.inflate(-2, -2))
+        dot_colour = palette.success if animating else palette.text_faint
+        primitives.filled_circle(self.screen, (x + 4, y + 7), 4, dot_colour)
+        label = "Playing" if animating else "Paused"
+        self.screen.blit(
+            self.fonts.ui("small").render(label, True, palette.text_muted),
+            (x + 15, y))
 
         speed_ratio = (self.animation_speed - SPEED_MIN_MS) / (SPEED_MAX_MS - SPEED_MIN_MS)
-        speed_ratio = max(0, min(1, speed_ratio))
+        speed_ratio = max(0.0, min(1.0, speed_ratio))
+        self.screen.blit(
+            self.fonts.ui("small").render(f"{self.animation_speed} ms", True,
+                                          palette.text_faint),
+            (x + 78, y))
 
-        # Draw slider handle
-        handle_x = slider_rect.x + int(speed_ratio * (slider_width - 8))
-        handle_rect = pygame.Rect(handle_x, slider_y - 1, 8, slider_rect.height + 2)
-        pygame.draw.rect(self.screen, self.colors['button_normal'], handle_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], handle_rect, 1)
+        # Track, filled portion, then handle. The rectangle comes from the
+        # layout so the handle can be grabbed before the panel is first drawn.
+        slider = self.layout.speed_slider
+        track = pygame.Rect(slider.x, slider.centery - 2, slider.width, 4)
+        primitives.panel(self.screen, track, palette.control, radius=2)
+        filled = pygame.Rect(track.x, track.y, int(track.width * speed_ratio), 4)
+        primitives.panel(self.screen, filled, palette.accent, radius=2)
 
-        # Speed label
-        speed_label = f"Speed: {self.animation_speed}ms"
-        speed_surface = self.font_small.render(speed_label, True, self.colors['text'])
-        self.screen.blit(speed_surface, (x, slider_y + 20))
+        handle_x = slider.x + speed_ratio * slider.width
+        primitives.filled_circle(self.screen, (handle_x, slider.centery), 7,
+                                 palette.panel_raised)
+        primitives.ring(self.screen, (handle_x, slider.centery), 7, 2,
+                        palette.accent)
 
-    def draw_string_visualization(self, test_string: str, current_step: int):
-        """Draw the test string with current position highlighted."""
+    def draw_string_visualization(self, test_string: str, current_step: int,
+                                  run: Optional[Any] = None):
+        """Draw the input tape, with the read head under the current symbol.
+
+        The head slides between cells rather than jumping, and symbols past the
+        point where the run stopped are dimmed and marked, so a rejection shows
+        both where it happened and how much of the word was never reached.
+        """
+        palette = self.theme.palette
+        strip = self.layout.string_strip
+
+        cell_w, cell_h = 34, 40
+        gap = 4
+        step = cell_w + gap
+        count = max(1, len(test_string))
+        total = count * step - gap
+
+        centre_x = self.screen_width // 2
+        if total <= self.screen_width - 80:
+            start_x = centre_x - total // 2
+        else:
+            target = centre_x - int((current_step + 0.5) * step)
+            start_x = max(self.screen_width - total - 40, min(40, target))
+
+        top = strip.y
+        stopped_at = getattr(run, "stopped_at", len(test_string))
+
+        # The empty word still deserves a cell, labelled.
         if not test_string:
+            rect = pygame.Rect(centre_x - 30, top, 60, cell_h)
+            primitives.panel(self.screen, rect, palette.strip_cell,
+                             radius=self.theme.radius.md, border=palette.border)
+            surface = self.fonts.ui("body").render("ε", True, palette.text_muted)
+            self.screen.blit(surface, surface.get_rect(center=rect.center))
             return
 
-        strip = self.layout.string_strip
-        string_y = strip.y
-        char_width = 30
-        char_height = strip.height
-
-        # Calculate total width needed
-        total_width = len(test_string) * char_width
-
-        # Calculate starting position for centering or scrolling
-        center_x = self.screen_width // 2
-
-        if total_width <= self.screen_width - 40:
-            # String fits on screen - center it
-            start_x = center_x - total_width // 2
-        else:
-            # String doesn't fit - implement scrolling
-            # Keep current character in center when possible
-            target_x = center_x - current_step * char_width
-
-            # Clamp to screen bounds
-            min_x = self.screen_width - total_width - 20
-            max_x = 20
-            start_x = max(min_x, min(max_x, target_x))
-
-        # Draw each character
+        mono = self.fonts.mono("strip")
         for i, char in enumerate(test_string):
-            char_x = start_x + i * char_width
-
-            # Skip characters that are off-screen
-            if char_x < -char_width or char_x > self.screen_width:
+            x = start_x + i * step
+            if x < -step or x > self.screen_width:
                 continue
 
-            # Create character rectangle
-            char_rect = pygame.Rect(char_x, string_y, char_width - 2, char_height)
+            consumed = i < current_step
+            unreached = i >= stopped_at and stopped_at < len(test_string)
+            is_current = i == current_step
 
-            # Choose colors based on position
-            if i == current_step:
-                # Current character - bright highlight
-                bg_color = self.colors['success']
-                text_color = (0, 0, 0)
-                border_color = (255, 255, 255)
-            elif i < current_step:
-                # Processed characters - dim
-                bg_color = (100, 100, 100)
-                text_color = (200, 200, 200)
-                border_color = (150, 150, 150)
+            rect = pygame.Rect(x, top, cell_w, cell_h)
+            if is_current:
+                fill, text_color = palette.strip_cell_current, palette.text_on_accent
+            elif consumed:
+                fill, text_color = palette.strip_cell_done, palette.strip_text_done
             else:
-                # Unprocessed characters - normal
-                bg_color = (50, 50, 50)
-                text_color = (255, 255, 255)
-                border_color = (100, 100, 100)
+                fill, text_color = palette.strip_cell, palette.strip_text
 
-            # Draw character background and border
-            pygame.draw.rect(self.screen, bg_color, char_rect)
-            pygame.draw.rect(self.screen, border_color, char_rect, 2)
+            if unreached and not is_current:
+                text_color = palette.text_faint
 
-            # Draw character text
-            char_surface = self.font_medium.render(char, True, text_color)
-            char_text_rect = char_surface.get_rect(center=char_rect.center)
-            self.screen.blit(char_surface, char_text_rect)
+            primitives.panel(self.screen, rect, fill, radius=self.theme.radius.md,
+                             border=palette.accent if is_current else palette.border)
+            surface = mono.render(char, True, text_color)
+            self.screen.blit(surface, surface.get_rect(center=rect.center))
+
+            # A tick under everything the machine actually read.
+            if consumed:
+                pygame.draw.line(self.screen, palette.success,
+                                 (rect.x + 8, rect.bottom + 3),
+                                 (rect.right - 8, rect.bottom + 3), 2)
+
+        # The point the run halted, if it stopped short.
+        if stopped_at < len(test_string):
+            marker_x = start_x + stopped_at * step - gap // 2
+            pygame.draw.line(self.screen, palette.error,
+                             (marker_x, top - 4), (marker_x, top + cell_h + 4), 2)
 
     def _draw_help_panel(self):
         """Draw the help panel with scrollable content.
@@ -939,12 +1068,13 @@ class UIManager:
         HELP_LINES, which is also what the scroll handler reads. They used to be
         independent constants that disagreed.
         """
+        palette = self.theme.palette
         panel_rect = self.layout.help_panel
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], panel_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], panel_rect, 3)
+        primitives.panel(self.screen, panel_rect, palette.panel_raised,
+                         radius=self.theme.radius.lg, border=palette.border_strong)
 
         # Title
-        title_text = self.font_large.render("Help & Controls", True, self.colors['text'])
+        title_text = self.fonts.ui("heading").render("Controls", True, palette.text)
         title_rect = title_text.get_rect(centerx=panel_rect.centerx, y=panel_rect.y + 10)
         self.screen.blit(title_text, title_rect)
 
@@ -958,25 +1088,28 @@ class UIManager:
         for i in range(start_line, end_line):
             line = HELP_LINES[i]
             display_y = content_y + (i - start_line) * HELP_LINE_HEIGHT
-            text_x = panel_rect.x + (30 if line.startswith("-") else 15)
-            text_surface = self.font_small.render(line, True, self.colors['text'])
+            text_x = panel_rect.x + (28 if line.startswith("-") else 16)
+            is_heading = line.endswith(":")
+            font = self.fonts.ui("small_strong" if is_heading else "small")
+            colour = palette.text if is_heading else palette.text_muted
+            text_surface = font.render(line.lstrip("- "), True, colour)
             self.screen.blit(text_surface, (text_x, display_y))
 
         # Scrollbar
         if len(HELP_LINES) > visible_lines:
             scrollbar_x = panel_rect.right - 15
             scrollbar_height = visible_lines * HELP_LINE_HEIGHT
-            scrollbar_rect = pygame.Rect(scrollbar_x, content_y, 10, scrollbar_height)
-            pygame.draw.rect(self.screen, self.colors['ui_border'], scrollbar_rect)
+            scrollbar_rect = pygame.Rect(scrollbar_x, content_y, 6, scrollbar_height)
+            primitives.panel(self.screen, scrollbar_rect, palette.control, radius=3)
 
             thumb_height = max(20, int(scrollbar_height * visible_lines / len(HELP_LINES)))
             thumb_y = content_y + int((scrollbar_height - thumb_height) * start_line
                                       / (len(HELP_LINES) - visible_lines))
-            thumb_rect = pygame.Rect(scrollbar_x + 1, thumb_y, 8, thumb_height)
-            pygame.draw.rect(self.screen, self.colors['button_normal'], thumb_rect)
+            thumb_rect = pygame.Rect(scrollbar_x, thumb_y, 6, thumb_height)
+            primitives.panel(self.screen, thumb_rect, palette.border_strong, radius=3)
 
-            footer = self.font_small.render("Scroll wheel to see more", True,
-                                            self.colors['text'])
+            footer = self.fonts.ui("small").render("Scroll for more", True,
+                                                   palette.text_faint)
             self.screen.blit(footer, footer.get_rect(centerx=panel_rect.centerx,
                                                      y=panel_rect.bottom - 20))
 
@@ -989,10 +1122,12 @@ class UIManager:
         item_height = CONTEXT_MENU_ITEM_HEIGHT
         menu_width = CONTEXT_MENU_WIDTH
 
-        # Background
+        palette = self.theme.palette
         menu_rect = self._context_menu_rect()
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], menu_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], menu_rect, 2)
+        primitives.soft_shadow(self.screen, menu_rect.center, menu_rect.width / 2,
+                               palette.shadow, layers=3, spread=6)
+        primitives.panel(self.screen, menu_rect, palette.panel_raised,
+                         radius=self.theme.radius.md, border=palette.border_strong)
 
         # Menu items
         mouse_pos = pygame.mouse.get_pos()
@@ -1001,18 +1136,19 @@ class UIManager:
             item_rect = pygame.Rect(menu_x, item_y, menu_width, item_height)
 
             # Highlight hovered item
-            if item_rect.collidepoint(mouse_pos):
-                pygame.draw.rect(self.screen, self.colors['button_hover'], item_rect)
+            if item_rect.collidepoint(mouse_pos) and label != "---":
+                primitives.panel(self.screen, item_rect.inflate(-6, -2),
+                                 palette.control_hover, radius=self.theme.radius.sm)
                 self.context_menu.selected_index = i
 
             # Separator line
             if label == "---":
                 line_y = item_y + item_height // 2
-                pygame.draw.line(self.screen, self.colors['ui_border'],
-                               (menu_x + 5, line_y), (menu_x + menu_width - 5, line_y))
+                pygame.draw.line(self.screen, palette.border,
+                               (menu_x + 10, line_y), (menu_x + menu_width - 10, line_y))
             else:
-                # Draw text
-                text_surface = self.font_small.render(label, True, self.colors['text'])
+                colour = palette.error if label.startswith("Delete") else palette.text
+                text_surface = self.fonts.ui("small").render(label, True, colour)
                 text_rect = text_surface.get_rect(midleft=(menu_x + 10, item_y + item_height // 2))
                 self.screen.blit(text_surface, text_rect)
 
@@ -1109,53 +1245,74 @@ class UIManager:
         return False
 
     def draw_execution_status(self, execution_active: bool, execution_step: int,
-                            execution_string: str, execution_path: List[str]):
+                              _execution_string: str, execution_path: List[str],
+                              run: Optional[Any] = None):
         """
-        Draw execution status with step information.
+        Draw the execution trace panel.
+
+        Positions are counted in *transitions taken*, against the length of the
+        run. The old panel counted the current index against the length of the
+        input string, so it reported "Step 3/5" for a run that had halted after
+        two symbols, and never said why it stopped.
 
         Args:
             execution_active: Whether execution visualization is active
-            execution_step: Current step in execution
+            execution_step: Position in the run
             execution_string: String being processed
-            execution_path: Path of states visited
+            execution_path: States visited
+            run: The engine's record of the run, if there is one
         """
         self.execution_panel_visible = execution_active
         if not execution_active:
             return
 
+        palette = self.theme.palette
         panel_rect = self.layout.execution_panel
-        panel_x, panel_y = panel_rect.x, panel_rect.y
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], panel_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], panel_rect, 2)
+        primitives.panel(self.screen, panel_rect, palette.panel,
+                         radius=self.theme.radius.lg, border=palette.border)
 
-        # Title
-        title_text = self.font_medium.render("Execution Trace", True, self.colors['text'])
-        self.screen.blit(title_text, (panel_x + 10, panel_y + 10))
+        x = panel_rect.x + self.theme.space.md
+        y = panel_rect.y + self.theme.space.md
+        self._section_label("Run", (x, y))
 
-        # Current step info
-        if execution_step < len(execution_string):
-            current_char = execution_string[execution_step]
-            step_text = f"Step {execution_step + 1}/{len(execution_string)}: Reading '{current_char}'"
+        total_steps = max(0, len(execution_path) - 1)
+        position = f"{execution_step} / {total_steps}"
+        pos_surface = self.fonts.ui("small_strong").render(position, True,
+                                                           palette.text_muted)
+        self.screen.blit(pos_surface, (panel_rect.right - self.theme.space.md
+                                       - pos_surface.get_width(), y))
+
+        # Progress bar across the run.
+        track = pygame.Rect(x, y + 20, panel_rect.width - self.theme.space.md * 2, 4)
+        primitives.panel(self.screen, track, palette.control, radius=2)
+        if total_steps:
+            done = pygame.Rect(track.x, track.y,
+                               int(track.width * execution_step / total_steps), 4)
+            primitives.panel(self.screen, done, palette.accent, radius=2)
+
+        current_state = (execution_path[execution_step]
+                         if execution_step < len(execution_path) else "-")
+        state_line = self.fonts.ui("body_strong").render(
+            f"in {current_state}", True, palette.text)
+        self.screen.blit(state_line, (x, y + 32))
+
+        steps = getattr(run, "steps", ()) or ()
+        verdict = getattr(run, "verdict", None)
+        if execution_step < len(steps):
+            step = steps[execution_step]
+            detail = f"next: read '{step.symbol}' to {step.target}"
+        elif verdict is not None:
+            detail = str(verdict.value).replace("_", " ")
         else:
-            step_text = "Finished processing string"
+            detail = "run complete"
+        self.screen.blit(
+            self.fonts.ui("small").render(detail, True, palette.text_muted),
+            (x, y + 54))
 
-        step_surface = self.font_small.render(step_text, True, self.colors['text'])
-        self.screen.blit(step_surface, (panel_x + 10, panel_y + 35))
-
-        # Current state
-        if execution_step < len(execution_path):
-            current_state = execution_path[execution_step]
-            state_text = f"Current state: {current_state}"
-        else:
-            state_text = "Execution complete"
-
-        state_surface = self.font_small.render(state_text, True, self.colors['text'])
-        self.screen.blit(state_surface, (panel_x + 10, panel_y + 55))
-
-        # Controls
-        controls_text = "N: Next, P: Previous, TAB: Animation, ESC: Stop"
-        controls_surface = self.font_small.render(controls_text, True, self.colors['text'])
-        self.screen.blit(controls_surface, (panel_x + 10, panel_y + 85))
+        hint = "N next   P back   Tab play   Esc stop"
+        self.screen.blit(
+            self.fonts.ui("small").render(hint, True, palette.text_faint),
+            (x, panel_rect.bottom - 24))
 
     def _draw_add_symbol_dialog(self):
         """Draw the add symbol dialog."""
