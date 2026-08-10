@@ -349,6 +349,10 @@ class AutomatonSimulator:
                 self._handle_confirmed(value)
             elif action == 'toggle_theme':
                 self._toggle_theme()
+            elif action == 'complete_automaton':
+                self._complete_automaton()
+            elif action == 'focus_states':
+                self._focus_states(value)
             elif action == 'symbol_add':
                 self._add_symbol(value)
             elif action == 'symbol_added':
@@ -434,6 +438,45 @@ class AutomatonSimulator:
         detail = (f", replacing {replaced} transition{'s' if replaced != 1 else ''}"
                   if replaced else "")
         self._show_message(f"{state} now loops on {alphabet}{detail}")
+
+    def _complete_automaton(self) -> None:
+        """One click from "your machine is incomplete" to a total automaton.
+
+        Adds a trap state and routes every undefined (state, symbol) pair to
+        it. The language is unchanged -- previously-undefined runs now die in
+        the trap instead of halting -- which is precisely the lesson the
+        diagnostics panel is teaching when it flags incompleteness.
+        """
+        before = len(fsa.missing_transitions(self.editor.automaton))
+        document, trap = self.editor.document.complete()
+        if trap is None:
+            self._show_message("Already complete")
+            return
+        self.editor.apply(document)
+        self._after_edit()
+        self.node_settle.set(trap, 1.0, duration=self.theme.motion.quick,
+                             easing=ease_out_back)
+        self._show_message(
+            f"Added {trap} and routed {before} missing "
+            f"transition{'s' if before != 1 else ''} to it")
+
+    def _focus_states(self, states: List[str]) -> None:
+        """Glide the camera to the states a diagnostic names."""
+        positions = [self.editor.position_of(s) for s in states
+                     if s in self.editor.automaton.states]
+        if not positions:
+            return
+        pad = default_state_radius() * 4
+        xs = [p[0] for p in positions]
+        ys = [p[1] for p in positions]
+        zoom, offset = self.renderer.fit_to_bounds(
+            (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad))
+        self.cam_zoom.set(zoom, duration=self.theme.motion.slow, easing=ease_in_out)
+        self.cam_offset.set(offset, duration=self.theme.motion.slow,
+                            easing=ease_in_out)
+        for state in states:
+            self.node_settle.set(state, 1.0, duration=self.theme.motion.quick,
+                                 easing=ease_out_back)
 
     def _add_symbol(self, symbol: str) -> None:
         if self.editor.add_symbol(symbol):
@@ -784,6 +827,10 @@ class AutomatonSimulator:
             self.node_active.set(state, 1.0 if state == current else 0.0)
 
         if self.token_travel.is_settled:
+            # The token exists only while travelling; parked on a node's rim it
+            # covered the label and contradicted the glow that already marks
+            # the current state.
+            self.traversing_step = None
             for edge in self.editor.automaton.grouped_transitions():
                 self.edge_active.set(f"{edge[0]}|{edge[1]}", 0.0,
                                      duration=self.theme.motion.normal)
@@ -814,6 +861,14 @@ class AutomatonSimulator:
             for a, b in ((source, target), (target, source)):
                 if a in positions and b in positions:
                     neighbours.setdefault(a, []).append(positions[b])
+
+        # The start marker enters the initial state from the left; treating it
+        # as a phantom neighbour keeps that state's self-loop from being drawn
+        # straight through the arrow.
+        initial = self.editor.automaton.initial
+        if initial in positions:
+            point = positions[initial]
+            neighbours.setdefault(initial, []).append((point[0] - 220.0, point[1]))
 
         return {
             state: geometry.quietest_direction(point, neighbours.get(state, []))
@@ -973,17 +1028,24 @@ class AutomatonSimulator:
         self.renderer.clear()
         self.renderer.draw_scene(self._build_scene())
 
+        # The diagnostics panel reads the editor's cached analysis; feeding it
+        # here keeps the UI a consumer of facts rather than a computer of them.
+        self.ui_manager.diagnostics = self.editor.defects()
+
         self.ui_manager.draw(self.editor.automaton, self.ui_manager.test_result,
-                             self.animation_active)
+                             self.animation_active, self.execution_active)
         self.ui_manager.draw_execution_status(
             self.execution_active, self.execution_step,
             self.execution_string, self.execution_path, self.run_result)
-        # After the execution panel, so the legend can sit below whichever
-        # panel is currently lowest instead of being drawn over.
         self.ui_manager.draw_legend(self.editor.automaton)
-        if self.execution_active:
-            self.ui_manager.draw_string_visualization(
-                self.execution_string, self.execution_step, self.run_result)
+        # Called even when inactive: the strip animates itself out.
+        self.ui_manager.draw_string_visualization(
+            self.execution_string, self.execution_step, self.run_result)
+
+        # Help, menus and modals paint over every panel; the toast over
+        # everything. When overlays lived inside draw(), the run panel and
+        # tape strip painted straight across an open Save dialog.
+        self.ui_manager.draw_overlays()
 
         if self.message_text:
             self._draw_message()

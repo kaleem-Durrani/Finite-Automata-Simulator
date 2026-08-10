@@ -49,9 +49,11 @@ class EditorModel:
         self.pending_source: Optional[StateId] = None
         self.pending_arc: float = 0.0
 
-        # (automaton, result) for the last analysis run. Keyed on the value
-        # itself, which is immutable, so there is no flag to forget to clear.
+        # (automaton, result) for the last analysis/defects run. Keyed on the
+        # value itself, which is immutable, so there is no flag to forget to
+        # clear.
         self._cached_analysis: Optional[Tuple[Any, Any]] = None
+        self._cached_defects: Optional[Tuple[Any, Any]] = None
 
     # ------------------------------------------------------------------
     # Document replacement
@@ -271,3 +273,20 @@ class EditorModel:
 
         self._cached_analysis = (automaton, result)
         return result
+
+    def defects(self) -> Tuple[fsa.Defect, ...]:
+        """Everything worth telling the user about the automaton, ranked.
+
+        Cached on the automaton value like :meth:`analysis`, because the
+        diagnostics panel reads this every frame and reverse-reachability every
+        16ms would be paying for the same answer over and over.
+        """
+        automaton = self.document.automaton
+        cached = getattr(self, "_cached_defects", None)
+        if cached is not None and cached[0] is automaton:
+            result: Tuple[fsa.Defect, ...] = cached[1]
+            return result
+
+        found = fsa.defects(automaton)
+        self._cached_defects = (automaton, found)
+        return found

@@ -12,13 +12,20 @@ import pygame
 
 import fsa
 from rendering import primitives
+from rendering.animation import Animated, Timer, ease_out
 from rendering.fonts import FontBook
 from rendering.theme import Theme
 from ui.layout_spec import (
     HELP_LINE_HEIGHT,
     HELP_TITLE_HEIGHT,
+    SLIDER_OFFSET,
+    SLIDER_SIZE,
     SPEED_MAX_MS,
     SPEED_MIN_MS,
+    STATUS_HEIGHT,
+    STATUS_MARGIN,
+    STATUS_WIDTH,
+    SYMBOL_PANEL_TOP,
     LayoutSpec,
 )
 
@@ -163,6 +170,36 @@ class UIManager:
         self.legend_dead = False
         self.legend_unreachable = False
 
+        # Structural problems with the automaton, set by the app each frame
+        # from the editor's cached analysis. Drives the diagnostics panel.
+        self.diagnostics: Tuple[Any, ...] = ()
+
+        # Side panels slide in and out rather than popping. Each panel key maps
+        # to an Animated 0..1; 1 is fully on screen. The column layout also
+        # scales each panel's occupied height by its slide value, so when one
+        # leaves, the panels below glide up instead of jumping.
+        self.slides: Dict[str, Animated] = {}
+
+        # This frame's right-column rects, for hit-testing. Recomputed at the
+        # top of draw(); events read the previous frame's values, which is
+        # harmless because a sliding panel takes ~260ms to arrive -- nothing
+        # can be clicked on the frame it first exists, unlike the modal-dialog
+        # bug this pattern replaced.
+        self._column: List[Tuple[str, pygame.Rect, float]] = []
+        self._diagnostic_rows: List[Tuple[pygame.Rect, Dict[str, Any]]] = []
+        self._fix_button: Optional[pygame.Rect] = None
+
+        # Which widget rect is currently held down, for the pressed visual.
+        self._pressed_rect: Optional[pygame.Rect] = None
+
+        # Tape strip motion: the scroll glides and the current cell pops.
+        self.strip_scroll = Animated(duration=self.theme.motion.normal,
+                                     easing=ease_out)
+        self.strip_pop = Timer(duration=self.theme.motion.quick)
+        self._strip_last_step = -1
+        self._strip_cache: Optional[Tuple[str, int, Any]] = None
+        self._strip_bounds: Optional[pygame.Rect] = None
+
         # No accepting state means no string can ever be accepted. The canvas
         # deliberately stays quiet about it -- marking every state dead would
         # be true and useless -- so the status panel has to say it instead.
@@ -221,8 +258,14 @@ class UIManager:
 
     def _button(self, rect: pygame.Rect, label: str, *, active: bool = False,
                 hovered: bool = False, accent: bool = False) -> None:
-        """Draw a labelled button in one of its three states."""
+        """Draw a labelled button with real depth.
+
+        Raised at rest, and pressed -- shadow gone, bevels inverted, label
+        nudged down a pixel -- while the mouse is held on it. The nudge is what
+        makes a click feel like a click.
+        """
         palette = self.theme.palette
+        pressed = self._pressed_rect == rect
         if accent or active:
             fill = palette.accent
             text_color = palette.text_on_accent
@@ -236,10 +279,13 @@ class UIManager:
             text_color = palette.text
             border = palette.border
 
-        primitives.panel(self.screen, rect, fill, radius=self.theme.radius.md,
-                         border=border)
+        nudge = primitives.raised_button(
+            self.screen, rect, fill, radius=self.theme.radius.md, border=border,
+            bevel_light=palette.bevel_light, bevel_dark=palette.bevel_dark,
+            pressed=pressed, shadow=palette.shadow)
         surface = self.fonts.ui("body_strong").render(label, True, text_color)
-        self.screen.blit(surface, surface.get_rect(center=rect.center))
+        self.screen.blit(surface, surface.get_rect(
+            center=(rect.centerx, rect.centery + nudge)))
 
     def _section_label(self, text: str, position: Tuple[int, int]) -> None:
         """A small uppercase caption above a group of controls."""
@@ -289,6 +335,15 @@ class UIManager:
 
     @property
     def speed_slider_rect(self) -> pygame.Rect:
+        """The slider tracks the status panel wherever it has slid to."""
+        for key, rect, _t in self._column:
+            if key == "status":
+                # Derived from the same constants as the static layout rect.
+                # An earlier version hardcoded the numbers here, so adjusting
+                # them in layout_spec silently moved only one of the two.
+                return pygame.Rect(rect.x + SLIDER_OFFSET[0],
+                                   rect.y + SLIDER_OFFSET[1],
+                                   SLIDER_SIZE[0], SLIDER_SIZE[1])
         return self.layout.speed_slider
 
     def update_screen_size(self, width: int, height: int):
@@ -335,12 +390,79 @@ class UIManager:
     # Hit testing
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # The sliding right column
+    # ------------------------------------------------------------------
+
+    def _slide(self, key: str, visible: bool) -> float:
+        """The 0..1 slide progress for a panel, easing toward its target."""
+        entry = self.slides.get(key)
+        if entry is None:
+            entry = Animated(value=0.0, target=0.0,
+                             duration=self.theme.motion.normal, easing=ease_out)
+            self.slides[key] = entry
+        entry.set(1.0 if visible else 0.0)
+        return entry.value
+
+    def _diagnostic_height(self) -> int:
+        """How tall the diagnostics panel wants to be for its current rows."""
+        rows = min(len(self.diagnostics), 4)
+        return 40 + rows * 40
+
+    def compute_right_column(self, execution_active: bool,
+                             legend_rows: int) -> List[Tuple[str, pygame.Rect, float]]:
+        """Lay out the right-hand panels for this frame.
+
+        Deterministic from current state -- panel heights depend only on
+        content counts known before drawing. Each panel slides horizontally by
+        its own progress, and the space it occupies scales with that progress,
+        so panels below glide up as one above departs instead of jumping.
+        """
+        width, margin, gap = STATUS_WIDTH, STATUS_MARGIN, 10
+        home_x = self.screen_width - width - margin
+        y = float(SYMBOL_PANEL_TOP + 10)
+
+        # Stop stacking where the tape strip band begins: on a short window the
+        # column used to run straight off the bottom and over the input panel.
+        # Panels are dropped lowest-first, which is also priority order.
+        limit = self.layout.string_strip.top - 8
+
+        wanted = [
+            ("status", True, STATUS_HEIGHT),
+            ("run", execution_active, 128),
+            ("diagnostics", bool(self.diagnostics), self._diagnostic_height()),
+            ("legend", legend_rows >= 2, 30 + legend_rows * 22),
+        ]
+
+        column: List[Tuple[str, pygame.Rect, float]] = []
+        for key, visible, height in wanted:
+            fits = y + height <= limit
+            t = self._slide(key, visible and fits)
+            if t <= 0.01:
+                continue
+            offset = (1.0 - t) * (width + margin * 2)
+            rect = pygame.Rect(int(home_x + offset), int(y), width, height)
+            column.append((key, rect, t))
+            y += (height + gap) * t
+        return column
+
     def opaque_panels(self) -> List[pygame.Rect]:
-        """The UI regions currently painted over the canvas."""
-        return self.layout.opaque_panels(
-            execution_active=self.execution_panel_visible,
-            help_open=self.show_help,
-        )
+        """The UI regions currently painted over the canvas.
+
+        The right column contributes its panels only once they are mostly on
+        screen, so a panel sliding away releases the canvas underneath it.
+        """
+        panels = [self.layout.toolbar, self.layout.symbol_panel,
+                  self.layout.input_panel]
+        panels += [rect for _key, rect, t in self._column if t > 0.5]
+        # The strip's opaque region is what was actually drawn, not the
+        # full-width band it lives in -- clicks beside the cells belong to
+        # the canvas.
+        if self._strip_bounds is not None:
+            panels.append(self._strip_bounds)
+        if self.show_help:
+            panels.append(self.layout.help_panel)
+        return panels
 
     def is_over_ui(self, pos: Tuple[int, int]) -> bool:
         """Whether a point lands on a UI panel rather than the canvas."""
@@ -369,6 +491,10 @@ class UIManager:
             (self.layout.speed_slider, self._on_speed_slider),
             (self.add_symbol_button_rect, self._on_add_symbol_button),
         ]
+        if self._fix_button is not None:
+            hits.append((self._fix_button, self._on_fix_button))
+        for row_rect, payload in self._diagnostic_rows:
+            hits.append((row_rect, self._diagnostic_handler(payload)))
         for symbol, rect in self.symbol_buttons.items():
             hits.append((rect, self._symbol_handler(symbol)))
         return [(rect, handler) for rect, handler in hits if rect is not None]
@@ -400,6 +526,14 @@ class UIManager:
         self.adding_symbol = True
         self.new_symbol_input = ""
         return {'add_symbol': True}
+
+    def _on_fix_button(self, _pos) -> Dict[str, Any]:
+        return {'complete_automaton': True}
+
+    def _diagnostic_handler(self, payload: Dict[str, Any]):
+        def handler(_pos) -> Dict[str, Any]:
+            return payload
+        return handler
 
     def _symbol_handler(self, symbol: str):
         def handler(_pos) -> Dict[str, Any]:
@@ -459,6 +593,7 @@ class UIManager:
         for rect, handler in self._widget_hits():
             if rect.collidepoint(pos):
                 self.input_active = rect is self.layout.input_field
+                self._pressed_rect = pygame.Rect(rect)
                 return handler(pos), True
 
         # Not a widget: clicking anywhere else drops text focus.
@@ -468,7 +603,8 @@ class UIManager:
         return actions, self.is_over_ui(pos)
 
     def _handle_mouse_up(self, event) -> Tuple[Dict[str, Any], bool]:
-        """Release the speed slider."""
+        """Release the speed slider and the pressed-button visual."""
+        self._pressed_rect = None
         if event.button == 1 and self.speed_slider_dragging:
             self.speed_slider_dragging = False
             return {}, True
@@ -677,23 +813,57 @@ class UIManager:
                     if self.input_text:
                         self.input_text = self.input_text[:-1]
 
-    def draw(self, automaton: "fsa.DFA", test_result: str = "", animation_active: bool = False):
+        # Panel slides and tape motion close toward their targets every frame.
+        for slide in self.slides.values():
+            slide.update(dt)
+        self.strip_scroll.update(dt)
+        self.strip_pop.update(dt)
+
+    def draw(self, automaton: "fsa.DFA", test_result: str = "",
+             animation_active: bool = False, execution_active: bool = False):
         """
         Draw all UI elements.
 
         Args:
-            dfa: The current DFA for displaying information
-            test_result: Result of the last string test
+            automaton: The current automaton, for the status panel and palette.
+            test_result: Result of the last string test.
             animation_active: Whether playback is running. Passed in rather than
                 pushed onto the manager after draw() has already run, which made
                 the indicator show the previous frame's state.
+            execution_active: Whether a run is being visualised, which decides
+                whether the run panel occupies its slot in the column.
         """
         self._animation_active = animation_active
-        self._draw_toolbar()
-        self._draw_input_area(test_result)
-        self._draw_alphabet_selector()
-        self._draw_status_info(automaton)
+        self.execution_panel_visible = execution_active
 
+        legend_rows = 1
+        legend_rows += 1 if automaton.accept else 0
+        legend_rows += 1 if self.legend_dead else 0
+        legend_rows += 1 if self.legend_unreachable else 0
+
+        self._column = self.compute_right_column(self.execution_panel_visible,
+                                                 legend_rows)
+        self._diagnostic_rows = []
+        self._fix_button = None
+
+        self._draw_toolbar()
+        self._draw_input_area(automaton, test_result)
+        self._draw_alphabet_selector()
+        for key, rect, _t in self._column:
+            if key == "status":
+                self._draw_status_info(automaton, rect)
+            elif key == "diagnostics":
+                self._draw_diagnostics(rect)
+
+    def draw_overlays(self) -> None:
+        """Everything that must sit above every panel: help, menus, modals.
+
+        A separate pass the application calls after the run panel, legend and
+        tape strip. When these were painted inside draw(), those later calls
+        painted over them -- the tape strip cut a row of cells straight through
+        the help text, and the run panel clipped the Save dialog while the rest
+        of the screen sat dimmed around them.
+        """
         if self.show_help:
             self._draw_help_panel()
 
@@ -703,7 +873,6 @@ class UIManager:
         if self.adding_symbol:
             self._draw_add_symbol_dialog()
 
-        # Modal dialogs paint last so nothing is drawn over them.
         if self.file_prompt_mode:
             self._draw_file_prompt()
 
@@ -721,10 +890,12 @@ class UIManager:
             width,
             height,
         )
-        primitives.soft_shadow(self.screen, rect.center, rect.width / 2,
-                               palette.shadow, layers=4, spread=10)
-        primitives.panel(self.screen, rect, palette.panel_raised,
-                         radius=self.theme.radius.lg, border=palette.border_strong)
+        primitives.elevated_panel(self.screen, rect, palette.panel_raised,
+                                  radius=self.theme.radius.lg,
+                                  border=palette.border_strong,
+                                  shadow=palette.shadow, lift=7,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
 
         title_surface = self.fonts.ui("heading").render(title, True, palette.text)
         self.screen.blit(title_surface, title_surface.get_rect(
@@ -808,37 +979,51 @@ class UIManager:
         self._button(self.help_button_rect, "Help", active=self.show_help,
                      hovered=self.help_button_rect.collidepoint(mouse_pos))
 
-    def _draw_input_area(self, test_result: str):
+    def _draw_input_area(self, automaton: "fsa.DFA", test_result: str):
         """Draw the input area for testing strings."""
         palette = self.theme.palette
         panel = self.layout.input_panel
-        primitives.panel(self.screen, panel, palette.panel,
-                         radius=self.theme.radius.lg, border=palette.border)
+        primitives.elevated_panel(self.screen, panel, palette.panel,
+                                  radius=self.theme.radius.lg,
+                                  border=palette.border, shadow=palette.shadow,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
 
         self._section_label("Test a string",
                             (panel.x + self.theme.space.md, panel.y + 10))
 
-        # Input field. Focus is shown with an accent ring rather than a colour
-        # change, which reads at a glance without moving anything.
+        # The field is sunken -- the one recessed surface on a screen of raised
+        # ones, which is what makes it read as "type here" without a label.
         field = self.input_rect
-        primitives.panel(self.screen, field, palette.field,
-                         radius=self.theme.radius.md,
-                         border=palette.accent if self.input_active else palette.border,
-                         border_width=2 if self.input_active else 1)
+        primitives.sunken_well(self.screen, field, palette.field,
+                               radius=self.theme.radius.md,
+                               border=(palette.accent if self.input_active
+                                       else palette.border),
+                               well_shadow=palette.well_shadow)
 
         font = self.fonts.mono("input")
         display_text = self.input_text if len(self.input_text) <= 22 else self.input_text[-22:]
         if display_text:
-            text_surface = font.render(display_text, True, palette.text)
+            # Character by character, so a symbol the alphabet does not contain
+            # shows red as it is typed -- the mistake is visible before Test is
+            # pressed, at the exact position it was made.
+            x = field.left + self.theme.space.sm
+            for char in display_text:
+                valid = char in automaton.alphabet
+                glyph = font.render(char, True,
+                                    palette.text if valid else palette.error)
+                self.screen.blit(glyph, glyph.get_rect(
+                    midleft=(x, field.centery)))
+                x += glyph.get_width()
+            caret_x = min(x + 2, field.right - 5)
         else:
-            text_surface = font.render("epsilon" if self.input_active else "type here",
-                                       True, palette.text_faint)
-        text_rect = text_surface.get_rect(
-            midleft=(field.left + self.theme.space.sm, field.centery))
-        self.screen.blit(text_surface, text_rect)
+            hint = font.render("epsilon" if self.input_active else "type here",
+                               True, palette.text_faint)
+            self.screen.blit(hint, hint.get_rect(
+                midleft=(field.left + self.theme.space.sm, field.centery)))
+            caret_x = field.left + self.theme.space.sm
 
         if self.input_active and pygame.time.get_ticks() % 1100 < 560:
-            caret_x = (text_rect.right + 2) if display_text else (field.left + self.theme.space.sm)
             pygame.draw.line(self.screen, palette.accent,
                              (caret_x, field.top + 6), (caret_x, field.bottom - 6), 2)
 
@@ -935,12 +1120,14 @@ class UIManager:
         add_rect = self.add_symbol_button_rect
         self._button(add_rect, "+", hovered=add_rect.collidepoint(mouse_pos))
 
-    def _draw_status_info(self, automaton: "fsa.DFA"):
+    def _draw_status_info(self, automaton: "fsa.DFA", panel_rect: pygame.Rect):
         """Draw status information about the current automaton."""
         palette = self.theme.palette
-        panel_rect = self.layout.status_panel
-        primitives.panel(self.screen, panel_rect, palette.panel,
-                         radius=self.theme.radius.lg, border=palette.border)
+        primitives.elevated_panel(self.screen, panel_rect, palette.panel,
+                                  radius=self.theme.radius.lg,
+                                  border=palette.border, shadow=palette.shadow,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
 
         info_x = panel_rect.x + self.theme.space.md
         info_y = panel_rect.y + self.theme.space.md
@@ -989,12 +1176,12 @@ class UIManager:
         the reader knows what those mean. Listing every kind all the time would
         be noise, so entries appear as the automaton acquires them.
 
-        Sits under whichever panel is currently the lowest on the right, so it
-        cannot be painted over by the execution panel -- which is exactly what
-        happened when its position was fixed relative to the status panel.
+        Lives in the sliding right column, so it can never collide with the
+        other panels -- each takes the space the one above releases.
         """
-        above = (self.layout.execution_panel if self.execution_panel_visible
-                 else self.layout.status_panel)
+        rect = next((r for key, r, _t in self._column if key == "legend"), None)
+        if rect is None:
+            return
         palette = self.theme.palette
         entries = [("normal", palette.state_fill, palette.state_ring, "plain")]
 
@@ -1011,10 +1198,11 @@ class UIManager:
             return
 
         row_h = 22
-        rect = pygame.Rect(above.x, above.bottom + 10, above.width,
-                           row_h * len(entries) + 30)
-        primitives.panel(self.screen, rect, palette.panel,
-                         radius=self.theme.radius.lg, border=palette.border)
+        primitives.elevated_panel(self.screen, rect, palette.panel,
+                                  radius=self.theme.radius.lg,
+                                  border=palette.border, shadow=palette.shadow,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
         self._section_label("Legend", (rect.x + self.theme.space.md,
                                        rect.y + self.theme.space.md))
 
@@ -1037,6 +1225,75 @@ class UIManager:
                              (rect.x + self.theme.space.md + 26, y))
             y += row_h
 
+    def _draw_diagnostics(self, rect: pygame.Rect) -> None:
+        """Structural problems with the automaton, each one actionable.
+
+        Rows with named states can be clicked to jump the camera to them; the
+        "incomplete" row carries a Fix button that adds a trap state and routes
+        every missing transition to it in one click. The visual feedback *is*
+        the lesson: a rejection for want of an arrow is a different problem
+        from a wrong language, and this panel is where that becomes concrete.
+        """
+        palette = self.theme.palette
+        primitives.elevated_panel(self.screen, rect, palette.panel,
+                                  radius=self.theme.radius.lg,
+                                  border=palette.border, shadow=palette.shadow,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
+        self._section_label("Diagnostics", (rect.x + self.theme.space.md,
+                                            rect.y + self.theme.space.md))
+
+        font = self.fonts.ui("tiny")
+        row_y = rect.y + 34
+        for defect in self.diagnostics[:4]:
+            row = pygame.Rect(rect.x + 6, row_y, rect.width - 12, 36)
+
+            colour = palette.error if defect.is_blocking else palette.warning
+            if defect.kind == "unreachable_states":
+                colour = palette.unreachable_ring
+            primitives.filled_circle(self.screen, (row.x + 10, row.y + 10), 4,
+                                     colour)
+
+            has_fix = defect.kind == "incomplete"
+            budget = row.width - 28 - (44 if has_fix else 0)
+
+            # Two wrapped lines rather than one truncated one: a single line
+            # always cut exactly the part that named the states and symbols,
+            # which is the panel's entire teaching content.
+            words = defect.message.split()
+            lines: List[str] = []
+            current = ""
+            for word in words:
+                trial = (current + " " + word).strip()
+                if font.size(trial)[0] <= budget or not current:
+                    current = trial
+                else:
+                    lines.append(current)
+                    current = word
+                    if len(lines) == 2:
+                        break
+            if current and len(lines) < 2:
+                lines.append(current)
+            if len(lines) == 2 and font.size(lines[1])[0] > budget:
+                while lines[1] and font.size(lines[1] + "...")[0] > budget:
+                    lines[1] = lines[1][:-2]
+                lines[1] += "..."
+
+            for j, text in enumerate(lines):
+                self.screen.blit(font.render(text, True, palette.text_muted),
+                                 (row.x + 22, row.y + 3 + j * 14))
+
+            if has_fix:
+                fix = pygame.Rect(row.right - 40, row.y + 6, 36, 24)
+                self._button(fix, "Fix", accent=True,
+                             hovered=fix.collidepoint(pygame.mouse.get_pos()))
+                self._fix_button = fix
+            elif defect.states:
+                self._diagnostic_rows.append(
+                    (row, {"focus_states": list(defect.states)}))
+
+            row_y += 40
+
     def _draw_animation_controls_in_status(self, x: int, y: int):
         """Playback speed, inside the status panel."""
         palette = self.theme.palette
@@ -1056,9 +1313,8 @@ class UIManager:
                                           palette.text_faint),
             (x + 78, y))
 
-        # Track, filled portion, then handle. The rectangle comes from the
-        # layout so the handle can be grabbed before the panel is first drawn.
-        slider = self.layout.speed_slider
+        # Track, filled portion, then handle, following the slid panel.
+        slider = self.speed_slider_rect
         track = pygame.Rect(slider.x, slider.centery - 2, slider.width, 4)
         primitives.panel(self.screen, track, palette.control, radius=2)
         filled = pygame.Rect(track.x, track.y, int(track.width * speed_ratio), 4)
@@ -1071,45 +1327,91 @@ class UIManager:
                         palette.accent)
 
     def draw_string_visualization(self, test_string: str, current_step: int,
-                                  run: Optional[Any] = None):
-        """Draw the input tape, with the read head under the current symbol.
+                                  run: Optional[Any] = None) -> None:
+        """Draw the input tape: sliding in and out, scrolling, popping.
 
-        The head slides between cells rather than jumping, and symbols past the
-        point where the run stopped are dimmed and marked, so a rejection shows
-        both where it happened and how much of the word was never reached.
+        The strip glides up from the bottom edge when a run starts and back
+        down when it stops -- which needs the *previous* run's content for the
+        exit animation, so the last drawn state is cached. The scroll between
+        cells eases rather than jumping, and the cell under the read head pops
+        briefly when the position changes.
         """
+        was_hidden = (self.slides.get("strip") is None
+                      or self.slides["strip"].value <= 0.01)
+        t = self._slide("strip", self.execution_panel_visible)
+        if self.execution_panel_visible:
+            self._strip_cache = (test_string, current_step, run)
+        elif self._strip_cache is not None:
+            test_string, current_step, run = self._strip_cache
+        if t <= 0.01:
+            self._strip_cache = None
+            self._strip_bounds = None
+            return
+
         palette = self.theme.palette
         strip = self.layout.string_strip
-
         cell_w, cell_h = 34, 40
-        gap = 4
+        gap = 6
         step = cell_w + gap
         count = max(1, len(test_string))
         total = count * step - gap
 
-        centre_x = self.screen_width // 2
-        if total <= self.screen_width - 80:
-            start_x = centre_x - total // 2
-        else:
-            target = centre_x - int((current_step + 0.5) * step)
-            start_x = max(self.screen_width - total - 40, min(40, target))
+        # Slide offset: fully below the bottom edge at t=0, in place at t=1.
+        # The travel spans the real distance to the window edge; a fixed 74px
+        # meant the exit animation stopped mid-screen and the strip blinked out.
+        rise = (1.0 - t) * (self.screen_height - strip.y + 8)
+        top = strip.y + int(rise)
 
-        top = strip.y
+        # The pop restarts whenever the read head moves.
+        if current_step != self._strip_last_step:
+            self._strip_last_step = current_step
+            self.strip_pop.start()
+
+        # The drawable span stops where the right column begins, so long
+        # strings scroll instead of painting cells across the diagnostics
+        # panel.
+        left_bound = 40
+        right_bound = self.screen_width - 40
+        if self._column:
+            right_bound = min(right_bound,
+                              min(rect.x for _k, rect, _t in self._column) - 12)
+
+        centre_x = (left_bound + right_bound) // 2
+        span = right_bound - left_bound
+        if total <= span:
+            target_x = centre_x - total // 2
+        else:
+            wanted = centre_x - int((current_step + 0.5) * step)
+            target_x = max(right_bound - total, min(left_bound, wanted))
+
+        # Ease toward the target, but jump on the frame the strip first
+        # appears. The old guard tested t < 0.05, which one 16ms update has
+        # already passed, so the strip visibly travelled in from x=0.
+        if was_hidden:
+            self.strip_scroll.jump_to(float(target_x))
+        else:
+            self.strip_scroll.set(float(target_x))
+        start_x = int(self.strip_scroll.value)
+
         stopped_at = getattr(run, "stopped_at", len(test_string))
 
-        # The empty word still deserves a cell, labelled.
         if not test_string:
             rect = pygame.Rect(centre_x - 30, top, 60, cell_h)
             primitives.panel(self.screen, rect, palette.strip_cell,
                              radius=self.theme.radius.md, border=palette.border)
-            surface = self.fonts.ui("body").render("ε", True, palette.text_muted)
-            self.screen.blit(surface, surface.get_rect(center=rect.center))
+            glyph = self.fonts.ui("body").render("ε", True, palette.text_muted)
+            self.screen.blit(glyph, glyph.get_rect(center=rect.center))
             return
 
+        self._strip_bounds = pygame.Rect(
+            max(left_bound - 8, min(start_x, right_bound) - 8), top - 12,
+            min(total, span) + 16, cell_h + 24)
+
         mono = self.fonts.mono("strip")
+        pop = 1.0 - self.strip_pop.progress
         for i, char in enumerate(test_string):
             x = start_x + i * step
-            if x < -step or x > self.screen_width:
+            if x < -step or x + cell_w > right_bound + cell_w // 2:
                 continue
 
             consumed = i < current_step
@@ -1117,28 +1419,37 @@ class UIManager:
             is_current = i == current_step
 
             rect = pygame.Rect(x, top, cell_w, cell_h)
+            if is_current and pop > 0.01:
+                grow = int(4 * pop)
+                rect = rect.inflate(grow, grow)
+
             if is_current:
                 fill, text_color = palette.strip_cell_current, palette.text_on_accent
             elif consumed:
                 fill, text_color = palette.strip_cell_done, palette.strip_text_done
             else:
                 fill, text_color = palette.strip_cell, palette.strip_text
-
             if unreached and not is_current:
                 text_color = palette.text_faint
 
-            primitives.panel(self.screen, rect, fill, radius=self.theme.radius.md,
-                             border=palette.accent if is_current else palette.border)
-            surface = mono.render(char, True, text_color)
-            self.screen.blit(surface, surface.get_rect(center=rect.center))
+            primitives.elevated_panel(
+                self.screen, rect, fill, radius=self.theme.radius.md,
+                border=palette.accent if is_current else palette.border,
+                shadow=palette.shadow, lift=3 if is_current else 2,
+                bevel_light=palette.bevel_light, bevel_dark=palette.bevel_dark)
+            glyph = mono.render(char, True, text_color)
+            self.screen.blit(glyph, glyph.get_rect(center=rect.center))
 
-            # A tick under everything the machine actually read.
+            if is_current:
+                # The read head: a marker above the cell, pointing at it.
+                primitives.pointer(self.screen, (rect.centerx, rect.top - 4),
+                                   8, palette.accent, direction="down")
+
             if consumed:
                 pygame.draw.line(self.screen, palette.success,
                                  (rect.x + 8, rect.bottom + 3),
                                  (rect.right - 8, rect.bottom + 3), 2)
 
-        # The point the run halted, if it stopped short.
         if stopped_at < len(test_string):
             marker_x = start_x + stopped_at * step - gap // 2
             pygame.draw.line(self.screen, palette.error,
@@ -1153,8 +1464,12 @@ class UIManager:
         """
         palette = self.theme.palette
         panel_rect = self.layout.help_panel
-        primitives.panel(self.screen, panel_rect, palette.panel_raised,
-                         radius=self.theme.radius.lg, border=palette.border_strong)
+        primitives.elevated_panel(self.screen, panel_rect, palette.panel_raised,
+                                  radius=self.theme.radius.lg,
+                                  border=palette.border_strong,
+                                  shadow=palette.shadow, lift=6,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
 
         # Title
         title_text = self.fonts.ui("heading").render("Controls", True, palette.text)
@@ -1171,11 +1486,19 @@ class UIManager:
         for i in range(start_line, end_line):
             line = HELP_LINES[i]
             display_y = content_y + (i - start_line) * HELP_LINE_HEIGHT
-            text_x = panel_rect.x + (28 if line.startswith("-") else 16)
+            # Bullets and their continuation lines share one inset; headers sit
+            # left of both. Continuations used to lose their leading spaces to
+            # lstrip and outdent past their own bullet.
+            if line.startswith("-") or line.startswith(" "):
+                text_x = panel_rect.x + 28
+                text = line.lstrip("- ").strip()
+            else:
+                text_x = panel_rect.x + 16
+                text = line
             is_heading = line.endswith(":")
             font = self.fonts.ui("small_strong" if is_heading else "small")
             colour = palette.text if is_heading else palette.text_muted
-            text_surface = font.render(line.lstrip("- "), True, colour)
+            text_surface = font.render(text, True, colour)
             self.screen.blit(text_surface, (text_x, display_y))
 
         # Scrollbar
@@ -1207,10 +1530,15 @@ class UIManager:
 
         palette = self.theme.palette
         menu_rect = self._context_menu_rect()
-        primitives.soft_shadow(self.screen, menu_rect.center, menu_rect.width / 2,
-                               palette.shadow, layers=3, spread=6)
-        primitives.panel(self.screen, menu_rect, palette.panel_raised,
-                         radius=self.theme.radius.md, border=palette.border_strong)
+        # A rectangular shadow under a rectangular menu. The circular
+        # soft_shadow used before bulged out below the bottom edge as a dark
+        # disc.
+        primitives.elevated_panel(self.screen, menu_rect, palette.panel_raised,
+                                  radius=self.theme.radius.md,
+                                  border=palette.border_strong,
+                                  shadow=palette.shadow, lift=5,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
 
         # Menu items
         mouse_pos = pygame.mouse.get_pos()
@@ -1329,14 +1657,18 @@ class UIManager:
             execution_path: States visited
             run: The engine's record of the run, if there is one
         """
-        self.execution_panel_visible = execution_active
         if not execution_active:
+            return
+        panel_rect = next((r for key, r, _t in self._column if key == "run"), None)
+        if panel_rect is None:
             return
 
         palette = self.theme.palette
-        panel_rect = self.layout.execution_panel
-        primitives.panel(self.screen, panel_rect, palette.panel,
-                         radius=self.theme.radius.lg, border=palette.border)
+        primitives.elevated_panel(self.screen, panel_rect, palette.panel,
+                                  radius=self.theme.radius.lg,
+                                  border=palette.border, shadow=palette.shadow,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
 
         x = panel_rect.x + self.theme.space.md
         y = panel_rect.y + self.theme.space.md
@@ -1382,67 +1714,47 @@ class UIManager:
             (x, panel_rect.bottom - 24))
 
     def _draw_add_symbol_dialog(self):
-        """Draw the add symbol dialog."""
-        # Dialog dimensions - increased height to prevent overlap
-        dialog_width = 300
-        dialog_height = 180
-        dialog_x = (self.screen_width - dialog_width) // 2
-        dialog_y = (self.screen_height - dialog_height) // 2
+        """The add-symbol dialog, on the same modal frame as its siblings.
 
-        # Background
-        dialog_rect = pygame.Rect(dialog_x, dialog_y, dialog_width, dialog_height)
-        pygame.draw.rect(self.screen, self.colors['ui_bg'], dialog_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], dialog_rect, 3)
+        It predated the elevation pass and looked like a different application
+        next to the Save dialog: square corners, hard borders, flat buttons,
+        and no dimmed backdrop despite being modal to the keyboard.
+        """
+        palette = self.theme.palette
+        rect = self._draw_modal_frame(300, 180, "Add a symbol")
 
-        # Title
-        title_text = self.font_medium.render("Add New Symbol", True, self.colors['text'])
-        title_rect = title_text.get_rect(centerx=dialog_x + dialog_width // 2, y=dialog_y + 15)
-        self.screen.blit(title_text, title_rect)
+        hint = self.fonts.ui("small").render(
+            "One printable character.", True, palette.text_muted)
+        self.screen.blit(hint, (rect.x + 20, rect.y + 48))
 
-        # Instructions
-        instruction_text = "Enter a single character:"
-        instruction_surface = self.font_small.render(instruction_text, True, self.colors['text'])
-        self.screen.blit(instruction_surface, (dialog_x + 20, dialog_y + 45))
+        field = pygame.Rect(rect.x + 20, rect.y + 68, 260, 32)
+        primitives.sunken_well(self.screen, field, palette.field,
+                               radius=self.theme.radius.md,
+                               border=palette.accent,
+                               well_shadow=palette.well_shadow)
 
-        # Input field
-        input_rect = pygame.Rect(dialog_x + 20, dialog_y + 65, 260, 30)
-        pygame.draw.rect(self.screen, self.colors['input_active'], input_rect)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], input_rect, 2)
-
-        # Input text
         if self.new_symbol_input:
-            text_surface = self.font_medium.render(self.new_symbol_input, True, self.colors['text'])
-            text_rect = text_surface.get_rect(midleft=(input_rect.left + 5, input_rect.centery))
-            self.screen.blit(text_surface, text_rect)
+            glyph = self.fonts.mono("input").render(
+                self.new_symbol_input, True, palette.text)
+            self.screen.blit(glyph, glyph.get_rect(
+                midleft=(field.left + 8, field.centery)))
+            caret_x = field.left + 8 + glyph.get_width() + 2
+        else:
+            caret_x = field.left + 8
 
-        # Cursor (blinking)
-        if pygame.time.get_ticks() % 1000 < 500:
-            cursor_x = input_rect.left + 5 + (len(self.new_symbol_input) * 12)
-            cursor_y1 = input_rect.top + 5
-            cursor_y2 = input_rect.bottom - 5
-            pygame.draw.line(self.screen, self.colors['text'], (cursor_x, cursor_y1), (cursor_x, cursor_y2), 2)
+        if pygame.time.get_ticks() % 1100 < 560:
+            pygame.draw.line(self.screen, palette.accent,
+                             (caret_x, field.top + 6),
+                             (caret_x, field.bottom - 6), 2)
 
-        # Buttons come from _symbol_dialog_buttons so that clicking and drawing
-        # use one definition, and so the buttons work on the dialog's first
-        # frame rather than only after it has been painted once.
-        cancel_button, add_button = self._symbol_dialog_buttons()
+        cancel, add = self._symbol_dialog_buttons()
+        mouse_pos = pygame.mouse.get_pos()
+        self._button(cancel, "Cancel",
+                     hovered=cancel.collidepoint(mouse_pos))
+        self._button(add, "Add", accent=True,
+                     hovered=add.collidepoint(mouse_pos))
 
-        # Cancel button
-        pygame.draw.rect(self.screen, self.colors['button_normal'], cancel_button)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], cancel_button, 2)
-        cancel_text = self.font_small.render("Cancel", True, self.colors['text'])
-        cancel_text_rect = cancel_text.get_rect(center=cancel_button.center)
-        self.screen.blit(cancel_text, cancel_text_rect)
-
-        # Add button
-        pygame.draw.rect(self.screen, self.colors['button_normal'], add_button)
-        pygame.draw.rect(self.screen, self.colors['ui_border'], add_button, 2)
-        add_text = self.font_small.render("Add", True, self.colors['text'])
-        add_text_rect = add_text.get_rect(center=add_button.center)
-        self.screen.blit(add_text, add_text_rect)
-
-        # Instructions at bottom
-        help_text = "Press Enter to add, Escape to cancel"
-        help_surface = self.font_small.render(help_text, True, self.colors['text'])
-        help_rect = help_surface.get_rect(centerx=dialog_x + dialog_width // 2, y=dialog_y + dialog_height - 20)
-        self.screen.blit(help_surface, help_rect)
+        footer = self.fonts.ui("small").render(
+            "Enter to add, Escape to cancel", True, palette.text_faint)
+        self.screen.blit(footer, footer.get_rect(
+            centerx=rect.centerx, y=rect.bottom - 24))

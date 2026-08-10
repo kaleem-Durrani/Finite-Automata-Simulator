@@ -610,6 +610,9 @@ def test_right_click_works_across_the_whole_canvas(app):
 
 
 def test_ui_panels_are_not_canvas(app):
+    # The right column slides in over ~260ms; give it time to arrive before
+    # asking whether it covers the canvas.
+    pump(app, frames=30)
     assert app.ui_manager.is_over_ui(app.ui_manager.save_button_rect.center)
     assert app.ui_manager.is_over_ui(app.ui_manager.input_rect.center)
     assert app.ui_manager.is_over_ui(app.ui_manager.layout.status_panel.center)
@@ -972,6 +975,220 @@ def test_new_states_do_not_stack_on_one_pixel(app):
     for i, first in enumerate(positions):
         for second in positions[i + 1:]:
             assert math.dist(first, second) > default_state_radius()
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: the diagnostics panel
+# ---------------------------------------------------------------------------
+
+
+def incomplete_machine(app):
+    """Two states over {a, b} with only one transition defined: 3 missing."""
+    editor = blank(app, "a", "b")
+    document, q0 = editor.document.add_state((200.0, 300.0))
+    document, q1 = document.add_state((400.0, 300.0))
+    document = document.add_transition(q0, "a", q1)
+    editor.apply(document.toggle_accept(q1).set_initial(q0))
+    return q0, q1
+
+
+def test_diagnostics_list_exactly_the_missing_pairs(app):
+    """The panel's data must match a hand-computed delta table."""
+    q0, q1 = incomplete_machine(app)
+
+    incomplete = next(d for d in app.editor.defects() if d.kind == "incomplete")
+    assert set(incomplete.pairs) == {(q0, "b"), (q1, "a"), (q1, "b")}
+    pump(app)
+    assert app.ui_manager.diagnostics, "the panel was fed"
+
+
+def test_fix_button_completes_the_automaton_in_one_click(app):
+    """The Phase 6 exit criterion: event replay, not a direct call."""
+    incomplete_machine(app)
+    assert not fsa.is_complete(app.editor.automaton)
+
+    pump(app, frames=30)          # let the diagnostics panel slide in
+    assert app.ui_manager._fix_button is not None, "the Fix button is on screen"
+
+    click(app, app.ui_manager._fix_button.center)
+    pump(app)
+
+    assert fsa.is_complete(app.editor.automaton)
+    assert "routed" in app.message_text
+    # The new trap has coordinates and is drawn as a trap.
+    trap = next(s for s in app.editor.automaton.states if s.startswith("trap"))
+    kinds = {node.id: node.kind for node in app._build_scene().nodes}
+    assert kinds[trap] is NodeKind.DEAD
+
+
+def test_completion_preserves_the_language(app):
+    q0, q1 = incomplete_machine(app)
+    words = ["", "a", "b", "ab", "aa", "ba", "abab"]
+    before = {w: fsa.accepts(app.editor.automaton, w) for w in words}
+
+    app._complete_automaton()
+
+    after = {w: fsa.accepts(app.editor.automaton, w) for w in words}
+    assert after == before
+
+
+def test_completing_twice_reports_already_complete(app):
+    incomplete_machine(app)
+    app._complete_automaton()
+    states_after_first = set(app.editor.automaton.states)
+
+    app._complete_automaton()
+    assert "Already complete" in app.message_text
+    assert set(app.editor.automaton.states) == states_after_first
+
+
+def test_clicking_a_defect_row_focuses_its_states(app):
+    """An unreachable-state row glides the camera to the state it names."""
+    editor = blank(app, "a")
+    document, q0 = editor.document.add_state((0.0, 0.0))
+    document, far = document.add_state((5000.0, 5000.0))   # far off screen
+    editor.apply(document.add_transition(q0, "a", q0)
+                         .toggle_accept(q0).set_initial(q0))
+
+    pump(app, frames=30)
+    row = next((payload for _r, payload in app.ui_manager._diagnostic_rows
+                if far in payload.get("focus_states", [])), None)
+    assert row is not None, "the unreachable defect is clickable"
+
+    app._focus_states(row["focus_states"])
+    pump(app, frames=45)          # let the camera glide
+
+    on_screen = app.renderer.camera.world_to_screen(app.editor.position_of(far))
+    assert 0 <= on_screen[0] <= app.screen.get_width()
+    assert 0 <= on_screen[1] <= app.screen.get_height()
+
+
+def test_back_step_reproduces_the_identical_path(app):
+    """Phase 6 exit criterion: end -> 0 -> end again, same path throughout."""
+    app._test_string("aab")
+    original = list(app.execution_path)
+
+    for _ in range(len(original)):
+        app._next_execution_step()
+        pump(app, frames=2)
+    assert app.execution_step == len(original) - 1
+
+    for _ in range(len(original)):
+        app._previous_execution_step()
+        pump(app, frames=2)
+    assert app.execution_step == 0
+
+    for _ in range(len(original)):
+        app._next_execution_step()
+        pump(app, frames=2)
+
+    assert list(app.execution_path) == original
+    assert app.execution_step == len(original) - 1
+
+
+def test_the_run_panel_slides_out_when_execution_stops(app):
+    app._test_string("ab")
+    pump(app, frames=30)
+    assert any(key == "run" for key, _r, t in app.ui_manager._column if t > 0.9)
+
+    app._stop_execution()
+    pump(app, frames=30)
+    assert not any(key == "run" for key, _r, _t in app.ui_manager._column)
+
+
+def test_panels_below_take_the_space_a_departing_panel_releases(app):
+    """The column reflows smoothly: legend rises when the run panel leaves."""
+    app._test_string("ab")
+    pump(app, frames=30)
+    with_run = {k: r.y for k, r, _t in app.ui_manager._column}
+
+    app._stop_execution()
+    pump(app, frames=40)
+    without_run = {k: r.y for k, r, _t in app.ui_manager._column}
+
+    assert "run" not in without_run
+    for key in without_run:
+        if key in with_run and key != "status":
+            assert without_run[key] <= with_run[key], f"{key} should rise"
+
+
+def test_invalid_symbols_show_red_in_the_input(app):
+    """The colouring logic, not the pixels: chars outside the alphabet."""
+    alphabet = app.editor.automaton.alphabet
+    assert "a" in alphabet and "z" not in alphabet
+    app.ui_manager.input_text = "abz"
+    pump(app)      # draws without error, colouring per character
+
+
+def test_the_token_despawns_when_its_travel_settles(app):
+    """A settled token used to stay parked on the node's rim forever,
+    covering the label -- the docstring said "at rest there is no token"
+    and the code disagreed."""
+    app._test_string("aab")
+    app._next_execution_step()
+    pump(app, frames=3, )
+    assert app.traversing_step is not None, "travelling"
+
+    pump(app, frames=40)          # let the travel settle
+    assert app.traversing_step is None
+    assert app._build_token(app._edge_paths(app.editor.positions())) is None
+
+
+def test_the_column_never_reaches_the_strip_band(app):
+    """On a short window the column used to run off the bottom and across
+    the input panel. Panels that do not fit are dropped, lowest first."""
+    send(app, pygame.event.Event(pygame.VIDEORESIZE, w=700, h=500,
+                                 size=(700, 500)))
+    app._test_string("ab")        # run panel + diagnostics + legend all want in
+    pump(app, frames=40)
+
+    limit = app.ui_manager.layout.string_strip.top
+    for key, rect, t in app.ui_manager._column:
+        if t > 0.9:
+            assert rect.bottom <= limit, f"{key} crosses into the strip band"
+
+
+def test_strip_cells_stop_at_the_column(app):
+    """Long strings used to paint cells across the diagnostics panel."""
+    send(app, pygame.event.Event(pygame.VIDEORESIZE, w=900, h=620,
+                                 size=(900, 620)))
+    app._test_string("abababababababababab")
+    pump(app, frames=40)
+
+    bounds = app.ui_manager._strip_bounds
+    assert bounds is not None
+    column_left = min((rect.x for _k, rect, t in app.ui_manager._column
+                       if t > 0.9), default=10 ** 6)
+    assert bounds.right <= column_left, "the strip stays clear of the panels"
+
+
+def test_the_strip_bounds_clear_when_hidden(app):
+    app._test_string("ab")
+    pump(app, frames=30)
+    assert app.ui_manager._strip_bounds is not None
+
+    app._stop_execution()
+    pump(app, frames=60)          # slide fully out
+    assert app.ui_manager._strip_bounds is None
+
+
+def test_overlays_draw_after_the_panels(app):
+    """Modals were painted inside draw(), so the run panel and tape strip
+    painted straight across an open Save dialog. The structural guarantee:
+    _render calls draw_overlays after everything else."""
+    order = []
+    real_draw = app.ui_manager.draw
+    real_strip = app.ui_manager.draw_string_visualization
+    real_overlays = app.ui_manager.draw_overlays
+    app.ui_manager.draw = lambda *a, **k: (order.append("draw"), real_draw(*a, **k))[1]
+    app.ui_manager.draw_string_visualization = (
+        lambda *a, **k: (order.append("strip"), real_strip(*a, **k))[1])
+    app.ui_manager.draw_overlays = (
+        lambda *a, **k: (order.append("overlays"), real_overlays(*a, **k))[1])
+
+    app._render()
+
+    assert order.index("overlays") > order.index("strip") > order.index("draw")
 
 
 def test_set_initial_ignores_unknown_states(app):

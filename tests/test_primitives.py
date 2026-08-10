@@ -158,3 +158,177 @@ def test_translucent_panels_keep_their_alpha():
                                  (255, 255, 255, 128), radius=4)
     pixel = surface.get_at((50, 50))
     assert 100 < pixel.r < 200, f"expected a blend, got {pixel}"
+
+
+# ---------------------------------------------------------------------------
+# Elevation
+# ---------------------------------------------------------------------------
+
+
+def test_a_shaded_circle_reuses_one_stamp():
+    """The gradient is a scanline loop plus a mask -- the most expensive fill
+    in the module. Redrawing it per node per frame would undo the cache win."""
+    surface = blank()
+    for i in range(12):
+        primitives.shaded_circle(surface, (60 + i, 60), 24, (100, 120, 150))
+    assert len(primitives._STAMPS) == 1
+
+
+def test_a_shaded_circle_restamps_for_radius_and_colour():
+    """Radius follows the zoom and colour follows the theme; a stale entry
+    for either would be visible immediately."""
+    surface = blank()
+    primitives.shaded_circle(surface, (60, 60), 24, (100, 120, 150))
+    primitives.shaded_circle(surface, (60, 60), 30, (100, 120, 150))
+    primitives.shaded_circle(surface, (60, 60), 24, (150, 120, 100))
+    assert len(primitives._STAMPS) == 3
+
+
+def test_a_shaded_circle_is_lit_from_above():
+    """Top lighter, bottom darker: otherwise it is just a flat disc and the
+    function has no reason to exist."""
+    surface = blank()
+    primitives.shaded_circle(surface, (120, 120), 50, (100, 100, 100))
+    top = surface.get_at((120, 80))
+    bottom = surface.get_at((120, 160))
+    assert top.r > bottom.r + 10, f"top {top} vs bottom {bottom}"
+
+
+def test_a_shaded_circle_stays_inside_its_radius():
+    surface = blank()
+    centre, radius = (120, 120), 40
+    primitives.shaded_circle(surface, centre, radius, (200, 60, 60, 255))
+    for x in range(0, 240, 2):
+        for y in range(0, 240, 2):
+            if surface.get_at((x, y)).a > 0:
+                distance = ((x - centre[0]) ** 2 + (y - centre[1]) ** 2) ** 0.5
+                # +1.5: the anti-aliased rim owns the pixel ring at radius+1.
+                assert distance <= radius + 1.5, f"({x},{y}) escaped the circle"
+
+
+def test_an_elevated_panel_casts_a_shadow_below_itself():
+    surface = blank()
+    rect = pygame.Rect(60, 60, 100, 50)
+    primitives.elevated_panel(surface, rect, (60, 60, 70), lift=4)
+    below = 0
+    for x in range(rect.left + 10, rect.right - 10, 2):
+        for y in range(rect.bottom, rect.bottom + 4):
+            if surface.get_at((x, y)).a > 0:
+                below += 1
+    assert below > 0, "no shadow pixels under the panel"
+
+
+def test_a_bevelled_panel_is_lighter_at_the_top_than_the_bottom():
+    surface = blank()
+    rect = pygame.Rect(60, 60, 100, 50)
+    primitives.elevated_panel(surface, rect, (100, 100, 100), radius=6,
+                              bevel_light=(255, 255, 255, 90),
+                              bevel_dark=(0, 0, 0, 90))
+    top = surface.get_at((110, rect.top + 1))
+    bottom = surface.get_at((110, rect.bottom - 2))
+    assert top.r > bottom.r, f"top {top} vs bottom {bottom}"
+
+
+def test_a_raised_button_reports_its_depth():
+    """The return value is the label's downward nudge. A cap that sinks while
+    its label stays put reads as two broken parts, not one pressed button."""
+    surface = blank()
+    rect = pygame.Rect(60, 60, 100, 40)
+    assert primitives.raised_button(surface, rect, (120, 120, 130)) == 0
+    assert primitives.raised_button(surface, rect, (120, 120, 130),
+                                    pressed=True) == 1
+
+
+def test_a_pressed_button_casts_no_shadow():
+    """Pressed means flush with the surface, so nothing may leak below."""
+    surface = blank()
+    rect = pygame.Rect(60, 60, 100, 40)
+    primitives.raised_button(surface, rect, (120, 120, 130), pressed=True)
+    for x in range(rect.left, rect.right, 2):
+        for y in range(rect.bottom, rect.bottom + 5):
+            assert surface.get_at((x, y)).a == 0, f"shadow at ({x},{y})"
+
+
+def test_a_pressed_button_is_darker_than_a_raised_one():
+    rect = pygame.Rect(60, 60, 100, 40)
+    raised = blank()
+    primitives.raised_button(raised, rect, (120, 120, 130))
+    pressed = blank()
+    primitives.raised_button(pressed, rect, (120, 120, 130), pressed=True)
+    assert pressed.get_at(rect.center).r < raised.get_at(rect.center).r
+
+
+def test_a_pressed_button_wears_its_bevel_upside_down():
+    """Concave surfaces put the dark edge on top -- the swap is most of what
+    makes a press look like a press rather than a colour change."""
+    rect = pygame.Rect(60, 60, 100, 40)
+    kwargs = dict(bevel_light=(255, 255, 255, 90), bevel_dark=(0, 0, 0, 90))
+    raised = blank()
+    primitives.raised_button(raised, rect, (120, 120, 130), **kwargs)
+    pressed = blank()
+    primitives.raised_button(pressed, rect, (120, 120, 130), pressed=True,
+                             **kwargs)
+    assert raised.get_at((110, 61)).r > raised.get_at((110, 98)).r
+    assert pressed.get_at((110, 61)).r < pressed.get_at((110, 98)).r
+
+
+def test_a_sunken_well_is_darker_near_its_top_edge():
+    surface = blank()
+    rect = pygame.Rect(60, 60, 120, 40)
+    primitives.sunken_well(surface, rect, (200, 200, 200), radius=6,
+                           well_shadow=(0, 0, 0, 90))
+    top = surface.get_at((120, rect.top + 1))
+    bottom = surface.get_at((120, rect.bottom - 5))
+    assert top.r < bottom.r, f"top {top} vs bottom {bottom}"
+
+
+def test_a_pointer_stays_by_its_tip():
+    for direction in ("up", "down", "left", "right"):
+        surface = blank()
+        primitives.pointer(surface, (120, 120), 10, (255, 0, 0, 255), direction)
+        assert painted(surface) > 0
+        for x in range(0, 240, 2):
+            for y in range(0, 240, 2):
+                if surface.get_at((x, y)).a > 0:
+                    assert abs(x - 120) <= 11 and abs(y - 120) <= 11, \
+                        f"{direction}: ({x},{y}) strayed from the tip"
+
+
+def test_a_pointer_points_the_way_it_is_told():
+    """The body must sit behind the tip: the half-plane beyond it stays empty,
+    give or take one anti-aliased pixel."""
+    # For each direction: which axis runs past the tip, and which way.
+    beyond = {
+        "down": ("y", 1),
+        "up": ("y", -1),
+        "right": ("x", 1),
+        "left": ("x", -1),
+    }
+    for direction, (axis, sign) in beyond.items():
+        surface = blank()
+        primitives.pointer(surface, (120, 120), 10, (255, 255, 255, 255),
+                           direction)
+        assert painted(surface) > 0
+        for x in range(0, 240, 2):
+            for y in range(0, 240, 2):
+                if surface.get_at((x, y)).a > 0:
+                    along = x if axis == "x" else y
+                    assert (along - 120) * sign <= 1, f"{direction}: ({x},{y})"
+
+
+def test_elevation_primitives_survive_extreme_coordinates():
+    """blit refuses destinations outside the int range rather than clipping --
+    the gfxdraw trap again, one layer up."""
+    surface = blank()
+    for point in [(10 ** 9, 10 ** 9), (-10 ** 9, 5), (0, -10 ** 12)]:
+        primitives.shaded_circle(surface, point, 20, (255, 0, 0, 255))
+        for direction in ("up", "down", "left", "right"):
+            primitives.pointer(surface, point, 8, (255, 0, 0, 255), direction)
+    # Rect coordinates themselves are limited to the C int range, so this is
+    # as far offscreen as a caller can even ask for.
+    far = pygame.Rect(10 ** 9, -(10 ** 9), 60, 30)
+    primitives.elevated_panel(surface, far, (40, 40, 50))
+    primitives.raised_button(surface, far, (40, 40, 50))
+    primitives.raised_button(surface, far, (40, 40, 50), pressed=True)
+    primitives.sunken_well(surface, far, (40, 40, 50),
+                           well_shadow=(0, 0, 0, 90))

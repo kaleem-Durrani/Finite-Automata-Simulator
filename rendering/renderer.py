@@ -179,7 +179,10 @@ class Renderer:
             ring_color = _mix(ring_color, palette.active_ring, node.active)
             fill = _mix(fill, palette.active_glow[:3], 0.22 * node.active)
 
-        primitives.filled_circle(self.screen, centre, radius, fill)
+        # A vertical gradient makes the state read as a softly lit sphere
+        # rather than a flat disc; the interaction states above still blend
+        # into the base colour before the gradient is applied.
+        primitives.shaded_circle(self.screen, centre, radius, fill)
 
         if node.kind is NodeKind.DEAD and radius > 8:
             primitives.hatch_circle(self.screen, centre, radius - 1,

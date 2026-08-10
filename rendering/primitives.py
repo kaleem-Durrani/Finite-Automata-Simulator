@@ -40,6 +40,16 @@ def _safe_all(points: Sequence[Point]) -> List[Tuple[int, int]]:
     return [_safe(point) for point in points]
 
 
+def _safe_rect(rect: pygame.Rect) -> pygame.Rect:
+    """Clamp a rect's position the way ``_safe`` clamps a point.
+
+    The elevation helpers blit scratch surfaces at the rect's corner, and blit
+    rejects destinations outside the int range rather than clipping -- the
+    same trap gfxdraw sets, waiting for a panel scrolled far offscreen.
+    """
+    return pygame.Rect(_safe(rect.topleft), rect.size)
+
+
 def on_screen(point: Point, size: Tuple[int, int], margin: float = 0.0) -> bool:
     """Whether a point is within the surface, allowing a margin."""
     return (-margin <= point[0] <= size[0] + margin
@@ -213,6 +223,51 @@ def hatch_circle(surface: pygame.Surface, centre: Point, radius: float,
         pygame.gfxdraw.filled_circle(mask, size // 2, size // 2, radius,
                                      (255, 255, 255, 255))
         layer.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+
+    _blit_centred(surface, _stamp(key, size, render), centre)
+
+
+def shaded_circle(surface: pygame.Surface, centre: Point, radius: float,
+                  color: Color, light: float = 0.18, dark: float = 0.12) -> None:
+    """A circle lit from above: blended toward white at the top, toward black
+    at the bottom, with an anti-aliased rim in the base colour.
+
+    The gradient is what makes a node read as a softly lit sphere instead of a
+    flat disc. Cached, because the scanline fill is by far the most expensive
+    drawing in this module and the picture is identical for every node of the
+    same size and colour.
+    """
+    radius = int(radius)
+    if radius < 1:
+        return
+
+    size = radius * 2 + 2
+    key = ("shaded", radius, tuple(color), round(light, 3), round(dark, 3))
+
+    def render(layer: pygame.Surface) -> None:
+        r, g, b = color[0], color[1], color[2]
+        alpha = color[3] if len(color) > 3 else 255
+        middle = size / 2
+        for row in range(size):
+            # -1 at the top edge, +1 at the bottom: scanlines above centre
+            # lean toward white, those below toward black.
+            t = (row - middle) / radius
+            if t < 0:
+                f = min(1.0, -t) * light
+                shade = (int(r + (255 - r) * f), int(g + (255 - g) * f),
+                         int(b + (255 - b) * f))
+            else:
+                f = min(1.0, t) * dark
+                shade = (int(r * (1 - f)), int(g * (1 - f)), int(b * (1 - f)))
+            pygame.draw.line(layer, (*shade, alpha), (0, row), (size, row))
+
+        # Masked to the circle exactly as the hatch is: clipping each scanline
+        # analytically is more code for the same pixels.
+        mask = pygame.Surface((size, size), pygame.SRCALPHA)
+        pygame.gfxdraw.filled_circle(mask, size // 2, size // 2, radius,
+                                     (255, 255, 255, 255))
+        layer.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+        pygame.gfxdraw.aacircle(layer, size // 2, size // 2, radius, color)
 
     _blit_centred(surface, _stamp(key, size, render), centre)
 
@@ -407,3 +462,149 @@ def dot_grid(surface: pygame.Surface, color: Color, spacing: float,
             surface.set_at((int(x), int(y)), color)
             y += spacing
         x += spacing
+
+
+# ----------------------------------------------------------------------
+# Elevation
+# ----------------------------------------------------------------------
+#
+# The 3D look: raised cards, buttons with depth, sunken fields. All of it is
+# fake light from a single overhead source -- highlight on top, lowlight
+# below, shadow cast downward -- and it only convinces if every surface agrees
+# on where that light is.
+
+
+def elevated_panel(surface: pygame.Surface, rect: pygame.Rect, fill: Color,
+                   radius: int = 8, border: Optional[Color] = None,
+                   shadow: Color = (0, 0, 0, 110), lift: int = 4,
+                   bevel_light: Optional[Color] = None,
+                   bevel_dark: Optional[Color] = None) -> None:
+    """A raised card: soft shadow below, bevelled light above.
+
+    The shadow is a stack of translucent rounded rects stepped downward with
+    fading alpha -- a real blur would cost a large surface allocation per
+    frame for something the eye only reads as "soft". Everything translucent
+    goes through an SRCALPHA scratch, because ``pygame.draw`` discards alpha
+    on opaque surfaces.
+    """
+    if rect.width <= 0 or rect.height <= 0:
+        return
+    rect = _safe_rect(rect)
+
+    if lift > 0:
+        base_alpha = shadow[3] if len(shadow) > 3 else 110
+        scratch = pygame.Surface((rect.width, rect.height + lift),
+                                 pygame.SRCALPHA)
+        # Faintest first: draw.rect overwrites rather than blends, so each
+        # nearer, stronger layer must land on top of the farther ones.
+        for offset in range(lift, 0, -1):
+            alpha = int(base_alpha * (lift - offset + 1) / (lift + 1))
+            if alpha < 1:
+                continue
+            pygame.draw.rect(scratch, (*shadow[:3], alpha),
+                             pygame.Rect(0, offset, rect.width, rect.height),
+                             border_radius=radius)
+        surface.blit(scratch, rect.topleft)
+
+    pygame.draw.rect(surface, fill, rect, border_radius=radius)
+    if border is not None:
+        pygame.draw.rect(surface, border, rect, width=1, border_radius=radius)
+
+    if bevel_light is not None or bevel_dark is not None:
+        bevel = pygame.Surface(rect.size, pygame.SRCALPHA)
+        # Inset by the corner radius so the lines stop where the rounding
+        # starts instead of poking out of it.
+        left, right = radius, rect.width - 1 - radius
+        if bevel_light is not None:
+            pygame.draw.line(bevel, bevel_light, (left, 1), (right, 1))
+        if bevel_dark is not None:
+            pygame.draw.line(bevel, bevel_dark,
+                             (left, rect.height - 2), (right, rect.height - 2))
+        surface.blit(bevel, rect.topleft)
+
+
+def raised_button(surface: pygame.Surface, rect: pygame.Rect, fill: Color,
+                  radius: int = 8, border: Optional[Color] = None,
+                  bevel_light: Optional[Color] = None,
+                  bevel_dark: Optional[Color] = None, pressed: bool = False,
+                  shadow: Color = (0, 0, 0, 90)) -> int:
+    """A button with depth that answers the pointer.
+
+    Returns how far the caller should nudge the label down: 1 when pressed, 0
+    when raised. The nudge is not decoration -- a cap that sinks while its
+    label stays put reads as two broken parts, not one pressed button.
+
+    Pressed is the raised drawing inverted: no shadow, the fill pulled ~8%
+    darker, and the bevel pair swapped so the dark edge sits on top, which is
+    what a concave surface does to overhead light.
+    """
+    if pressed:
+        sunk = tuple(int(c * 0.92) for c in fill[:3]) + tuple(fill[3:])
+        elevated_panel(surface, rect, sunk, radius=radius, border=border,
+                       shadow=shadow, lift=0, bevel_light=bevel_dark,
+                       bevel_dark=bevel_light)
+        return 1
+    elevated_panel(surface, rect, fill, radius=radius, border=border,
+                   shadow=shadow, lift=2, bevel_light=bevel_light,
+                   bevel_dark=bevel_dark)
+    return 0
+
+
+def sunken_well(surface: pygame.Surface, rect: pygame.Rect, fill: Color,
+                radius: int = 8, border: Optional[Color] = None,
+                well_shadow: Optional[Color] = None) -> None:
+    """A recessed field, the inverse of a raised card. For text entry.
+
+    Depth is read from the top edge: an inner shadow strongest at the very
+    top and fading over a few rows says the light is above and this surface
+    sits below it. The faint light line inside the bottom edge is the far lip
+    catching that same light.
+    """
+    if rect.width <= 0 or rect.height <= 0:
+        return
+    rect = _safe_rect(rect)
+
+    pygame.draw.rect(surface, fill, rect, border_radius=radius)
+
+    if well_shadow is not None:
+        base_alpha = well_shadow[3] if len(well_shadow) > 3 else 90
+        scratch = pygame.Surface(rect.size, pygame.SRCALPHA)
+        left, right = radius, rect.width - 1 - radius
+        rows = 3
+        for i in range(rows):
+            alpha = int(base_alpha * (rows - i) / rows)
+            if alpha < 1:
+                continue
+            pygame.draw.line(scratch, (*well_shadow[:3], alpha),
+                             (left, 1 + i), (right, 1 + i))
+        # A fixed faint white: over any plausible field colour it reads as the
+        # bottom lip catching the light, and is too small to earn a token.
+        pygame.draw.line(scratch, (255, 255, 255, 26),
+                         (left, rect.height - 2), (right, rect.height - 2))
+        surface.blit(scratch, rect.topleft)
+
+    if border is not None:
+        pygame.draw.rect(surface, border, rect, width=1, border_radius=radius)
+
+
+def pointer(surface: pygame.Surface, tip: Point, size: float, color: Color,
+            direction: str = "down") -> None:
+    """A small filled triangle whose tip sits exactly at ``tip``.
+
+    Marks the tape read-head. Not cached: one filled polygon on three points
+    costs less than the blit a stamp would replace it with.
+    """
+    if size < 1:
+        return
+    x, y = tip
+    if direction == "down":
+        points = [(x, y), (x - size, y - size), (x + size, y - size)]
+    elif direction == "up":
+        points = [(x, y), (x - size, y + size), (x + size, y + size)]
+    elif direction == "left":
+        points = [(x, y), (x + size, y - size), (x + size, y + size)]
+    elif direction == "right":
+        points = [(x, y), (x - size, y - size), (x - size, y + size)]
+    else:
+        raise ValueError(f"unknown pointer direction: {direction!r}")
+    polygon(surface, points, color)

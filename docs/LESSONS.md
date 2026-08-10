@@ -103,6 +103,13 @@ Same root cause, worth stating separately: if an action cannot be observed, it
 will be pressed repeatedly and reported as broken. *Every action reports, or
 does not exist.*
 
+**Paint order is a contract, and overlays are a final pass.**
+Modal dialogs were drawn inside `draw()`, then later calls painted the run
+panel and tape strip straight across an open Save dialog while the rest of the
+screen sat dimmed around them. Tests cannot see this; only rendering can.
+*Anything modal or floating draws in one dedicated last pass, and screenshot QA
+is part of verification for any UI change.*
+
 ---
 
 ## Tooling

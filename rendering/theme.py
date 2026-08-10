@@ -37,6 +37,12 @@ class Palette:
     border_strong: RGB
     shadow: RGBA
 
+    # Elevation. Painted by the primitives as 1px inner lines over a surface's
+    # own fill, so they carry alpha and one pair serves every control colour.
+    bevel_light: RGBA        # inner top-edge highlight on raised surfaces
+    bevel_dark: RGBA         # inner bottom-edge lowlight on raised surfaces
+    well_shadow: RGBA        # inner top shadow inside sunken fields
+
     # Type
     text: RGB
     text_muted: RGB
@@ -113,6 +119,10 @@ DARK = Palette(
     border_strong=(65, 72, 86),
     shadow=(0, 0, 0, 110),
 
+    bevel_light=(255, 255, 255, 26),
+    bevel_dark=(0, 0, 0, 96),
+    well_shadow=(0, 0, 0, 110),
+
     text=(228, 232, 240),
     text_muted=(140, 150, 168),
     text_faint=(96, 105, 122),
@@ -183,6 +193,10 @@ LIGHT = Palette(
     border=(226, 223, 217),
     border_strong=(196, 191, 183),
     shadow=(60, 55, 48, 34),
+
+    bevel_light=(255, 253, 247, 170),
+    bevel_dark=(60, 55, 48, 42),
+    well_shadow=(60, 55, 48, 46),
 
     text=(28, 28, 30),
     text_muted=(104, 102, 98),
