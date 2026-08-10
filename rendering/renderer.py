@@ -29,6 +29,23 @@ STATE_RADIUS = 30.0
 CULL_MARGIN = 140.0
 
 
+def _elide(font: pygame.font.Font, text: str, budget: float) -> str:
+    """``text``, shortened with an ellipsis until it fits within ``budget``.
+
+    A state's label is free text, so it has no natural relationship to the size
+    of the circle it sits in. Left alone it is blitted at full width over
+    whatever is behind it -- a long name painted a band clean across the
+    diagram, on top of the very transitions it was meant to describe.
+    """
+    if budget <= 0 or font.size(text)[0] <= budget:
+        return text
+    ellipsis = "…"
+    trimmed = text
+    while trimmed and font.size(trimmed + ellipsis)[0] > budget:
+        trimmed = trimmed[:-1]
+    return trimmed + ellipsis if trimmed else ellipsis
+
+
 def _mix(a: Sequence[int], b: Sequence[int], t: float) -> Tuple[int, int, int]:
     """Blend two colours. Used to interpolate along an animated value."""
     t = max(0.0, min(1.0, t))
@@ -215,7 +232,10 @@ class Renderer:
         else:
             colour = palette.state_text
         font = self.fonts.scaled("state", zoom)
-        surface = font.render(node.label, True, colour)
+        # Kept inside the disc: the label belongs to this state, so it must not
+        # be readable as belonging to whatever it would otherwise overlap.
+        surface = font.render(
+            _elide(font, node.label, node.radius * zoom * 1.7), True, colour)
         centre = self.camera.world_to_screen(node.position)
         self.screen.blit(surface, surface.get_rect(
             center=(int(centre[0]), int(centre[1]))))

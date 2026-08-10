@@ -270,6 +270,21 @@ class DFA:
             raise UnknownStateError(f"no such state: {state!r}")
         return self._replace(labels={**dict(self.labels), state: text})
 
+    def with_label_removed(self, state: StateId) -> "DFA":
+        """Drop a state's display name, so it shows as its own id again.
+
+        Dropping the entry is not the same as setting it to the id, even though
+        :meth:`label_of` cannot tell them apart. Equality can: ``labels`` is
+        part of the identity of the automaton, so ``{'q0': 'q0'}`` differs from
+        ``{}``. Writing the id back would therefore make "clear this label" look
+        like a real edit -- dirtying the file, spending an undo slot, and
+        leaving residue in the saved JSON -- for a change nobody can see.
+        """
+        if state not in self.labels:
+            return self
+        return self._replace(
+            labels={s: t for s, t in self.labels.items() if s != state})
+
     def with_states(self, states: Iterable[StateId]) -> "DFA":
         """Add several states at once."""
         automaton = self

@@ -2,7 +2,8 @@
 
 Holds the document being edited plus everything the *editor* knows that the
 document does not: what is selected, what the mouse is over, what is being
-dragged, whether there are unsaved changes, and where the file lives.
+dragged, whether there are unsaved changes, where the file lives, and what
+the document used to be (undo).
 
 That separation is the point. Three separate crashes came from the app keeping
 pointers into a mutable model and the model deleting the thing they pointed at.
@@ -14,10 +15,15 @@ No pygame. This is testable without a display.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import fsa
 from fsa import Document, Layout, Point, StateId
+
+#: How much history undo keeps. Documents share almost all of their structure,
+#: so 200 entries is cheap -- the cap exists to bound a marathon session, not
+#: because entries are expensive.
+UNDO_DEPTH = 200
 
 
 @dataclass
@@ -45,6 +51,13 @@ class EditorModel:
         self.dirty: bool = False
         self.path: Optional[str] = None
 
+        # History is a list of previous document values -- the payoff of the
+        # document being immutable. Each entry pairs the value to restore with
+        # the phrase naming the edit that replaced it, so the GUI can say what
+        # an undo undid.
+        self._undo: List[Tuple[Document, str]] = []
+        self._redo: List[Tuple[Document, str]] = []
+
         # Half-drawn transition, if any.
         self.pending_source: Optional[StateId] = None
         self.pending_arc: float = 0.0
@@ -59,19 +72,34 @@ class EditorModel:
     # Document replacement
     # ------------------------------------------------------------------
 
-    def apply(self, document: Document, *, dirty: bool = True) -> None:
+    def apply(self, document: Document, *, dirty: bool = True,
+              action: str = "edit") -> None:
         """Adopt a new document and drop any pointer it invalidates.
 
         Every edit goes through here, so there is exactly one place that has to
-        get reference cleanup right.
+        get reference cleanup right -- and, now, exactly one place that records
+        history. ``action`` is the short phrase undo will report ("add q3").
+
+        A document equal to the current one is adopted by doing nothing: a
+        no-op edit must not eat an undo slot or mark the file dirty.
         """
+        if document == self.document:
+            return
+        self._undo.append((self.document, action))
+        if len(self._undo) > UNDO_DEPTH:
+            del self._undo[0]
+        # A new edit invalidates the redone future.
+        self._redo.clear()
         self.document = document
         self.forget_missing()
         if dirty:
             self.dirty = True
 
     def replace(self, document: Document, path: Optional[str]) -> None:
-        """Load a whole new document, discarding all editing state."""
+        """Load a whole new document, discarding all editing state.
+
+        Including history: undo must not carry one file's past into another.
+        """
         self.document = document
         self.selection = None
         self.hover = None
@@ -80,6 +108,8 @@ class EditorModel:
         self.pending_arc = 0.0
         self.path = path
         self.dirty = False
+        self._undo.clear()
+        self._redo.clear()
 
     def forget_missing(self) -> None:
         """Drop references to states the document no longer contains."""
@@ -92,6 +122,46 @@ class EditorModel:
             self.drag = None
         if self.pending_source is not None and self.pending_source not in states:
             self.cancel_transition()
+
+    # ------------------------------------------------------------------
+    # Undo and redo
+    # ------------------------------------------------------------------
+
+    def undo(self) -> Optional[str]:
+        """Restore the previous document. Returns the phrase naming the edit
+        that was undone, or ``None`` if there was nothing to undo.
+
+        The restored value goes through the same pointer cleanup as an edit:
+        bringing a document back must not resurrect a selection or drag that
+        was dropped when its state disappeared.
+        """
+        if not self._undo:
+            return None
+        document, action = self._undo.pop()
+        self._redo.append((self.document, action))
+        self.document = document
+        self.forget_missing()
+        self.dirty = True
+        return action
+
+    def redo(self) -> Optional[str]:
+        """The mirror image of :meth:`undo`."""
+        if not self._redo:
+            return None
+        document, action = self._redo.pop()
+        self._undo.append((self.document, action))
+        self.document = document
+        self.forget_missing()
+        self.dirty = True
+        return action
+
+    @property
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    @property
+    def can_redo(self) -> bool:
+        return bool(self._redo)
 
     # ------------------------------------------------------------------
     # Reading
@@ -168,7 +238,10 @@ class EditorModel:
         drag, self.drag = self.drag, None
         if drag.position == self.document.layout.position_of(drag.state):
             return False
-        self.apply(self.document.move_state(drag.state, drag.position))
+        # One history entry per drag: motion accumulated in self.drag, so this
+        # is the first time the document changes.
+        self.apply(self.document.move_state(drag.state, drag.position),
+                   action=f"move {drag.state}")
         return True
 
     # ------------------------------------------------------------------
@@ -193,22 +266,49 @@ class EditorModel:
 
     def add_state(self, position: Point, minimum_gap: Optional[float] = None) -> StateId:
         document, state = self.document.add_state(position, minimum_gap=minimum_gap)
-        self.apply(document)
+        self.apply(document, action=f"add {state}")
         return state
 
     def remove_state(self, state: StateId) -> bool:
         if state not in self.document.automaton.states:
             return False
-        self.apply(self.document.remove_state(state))
+        self.apply(self.document.remove_state(state), action=f"delete {state}")
+        return True
+
+    def rename(self, state: StateId, label: str) -> bool:
+        """Set a state's display label. False if the state does not exist.
+
+        A blank label means "back to the id" -- there is no way to give a state
+        an invisible name. So does typing the id itself: both drop the label
+        rather than storing it, so that clearing a name returns the document to
+        the value it had before the name was given. Storing the id instead
+        would leave a document that renders identically but compares unequal,
+        which is enough to mark the file dirty and spend an undo slot on a
+        change with nothing to show for it.
+
+        The label is stripped, so it cannot differ from the name reported back
+        to the user by invisible padding.
+        """
+        if state not in self.document.automaton.states:
+            return False
+        text = label.strip()
+        automaton = (self.document.automaton.with_label(state, text)
+                     if text and text != state
+                     else self.document.automaton.with_label_removed(state))
+        self.apply(Document(automaton, self.document.layout, self.document.next_id),
+                   action=f"rename {state}")
         return True
 
     def toggle_accept(self, state: StateId) -> bool:
         """Returns whether the state accepts afterwards."""
-        self.apply(self.document.toggle_accept(state))
-        return state in self.document.automaton.accept
+        document = self.document.toggle_accept(state)
+        accepting = state in document.automaton.accept
+        self.apply(document, action=(f"accept {state}" if accepting
+                                     else f"unaccept {state}"))
+        return accepting
 
     def set_initial(self, state: Optional[StateId]) -> None:
-        self.apply(self.document.set_initial(state))
+        self.apply(self.document.set_initial(state), action=f"start at {state}")
 
     def add_transition(self, source: StateId, symbol: str, target: StateId,
                        arc: float = 0.0) -> bool:
@@ -221,11 +321,13 @@ class EditorModel:
         states = self.document.automaton.states
         if source not in states or target not in states:
             return False
-        self.apply(self.document.add_transition(source, symbol, target, arc))
+        self.apply(self.document.add_transition(source, symbol, target, arc),
+                   action=f"transition {source} -{symbol}-> {target}")
         return True
 
     def remove_transition(self, source: StateId, symbol: str) -> None:
-        self.apply(self.document.remove_transition(source, symbol))
+        self.apply(self.document.remove_transition(source, symbol),
+                   action=f"remove {source} -{symbol}->")
 
     def make_trap(self, state: StateId) -> Tuple[bool, int]:
         """Loop every symbol back to a state. Returns success and how many
@@ -236,14 +338,15 @@ class EditorModel:
         replaced = sum(
             1 for symbol in automaton.alphabet
             if automaton.target(state, symbol) not in (None, state))
-        self.apply(self.document.make_trap(state))
+        self.apply(self.document.make_trap(state), action=f"trap {state}")
         return True, replaced
 
     def add_symbol(self, symbol: str) -> bool:
         if symbol in self.document.automaton.alphabet:
             return False
         try:
-            self.apply(self.document.add_symbol(symbol))
+            self.apply(self.document.add_symbol(symbol),
+                       action=f"symbol '{symbol}'")
         except fsa.IllegalSymbolError:
             return False
         return True

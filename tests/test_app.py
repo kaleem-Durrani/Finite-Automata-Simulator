@@ -16,6 +16,7 @@ import pytest
 
 import fsa
 import main as main_module
+import rendering.renderer as renderer_module
 import ui.ui_manager as ui_manager_module
 from editor import EditorModel
 from fsa import serialize
@@ -61,6 +62,9 @@ def click(app: AutomatonSimulator, pos, button: int = 1, shift: bool = False):
     pygame.key.set_mods(pygame.KMOD_LSHIFT if shift else pygame.KMOD_NONE)
     try:
         send(app, pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=button, pos=pos))
+        if button == 3:
+            # Right-click menus open on release now, because a right-drag pans.
+            send(app, pygame.event.Event(pygame.MOUSEBUTTONUP, button=button, pos=pos))
     finally:
         pygame.key.set_mods(pygame.KMOD_NONE)
 
@@ -77,6 +81,13 @@ def move(app: AutomatonSimulator, pos, buttons=(1, 0, 0)):
 def press(app: AutomatonSimulator, code: int, char: str = ""):
     send(app, pygame.event.Event(pygame.KEYDOWN, key=code, unicode=char,
                                  mod=pygame.KMOD_NONE, scancode=0))
+
+
+def chord(app: AutomatonSimulator, code: int, mod: int):
+    """A modified keypress. Key events genuinely carry `mod`; mouse events
+    do not -- that distinction once hid a startup crash behind a green suite."""
+    send(app, pygame.event.Event(pygame.KEYDOWN, key=code, unicode="",
+                                 mod=mod, scancode=0))
 
 
 def screen_of(app: AutomatonSimulator, state: str):
@@ -1189,6 +1200,347 @@ def test_overlays_draw_after_the_panels(app):
     app._render()
 
     assert order.index("overlays") > order.index("strip") > order.index("draw")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: undo, edge editing, rename, right-drag panning
+# ---------------------------------------------------------------------------
+
+
+def test_ctrl_z_undoes_and_names_the_change(app):
+    before = app.editor.document
+    press(app, pygame.K_SPACE, " ")
+    assert app.editor.document != before
+
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    assert app.editor.document == before
+    assert "Undid add" in app.message_text
+
+
+def test_ctrl_y_and_ctrl_shift_z_redo(app):
+    press(app, pygame.K_SPACE, " ")
+    after = app.editor.document
+
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    chord(app, pygame.K_y, pygame.KMOD_CTRL)
+    assert app.editor.document == after
+
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    chord(app, pygame.K_z, pygame.KMOD_CTRL | pygame.KMOD_SHIFT)
+    assert app.editor.document == after
+
+
+def test_a_plain_z_does_not_undo(app):
+    press(app, pygame.K_SPACE, " ")
+    after = app.editor.document
+    press(app, pygame.K_z, "z")
+    assert app.editor.document == after
+
+
+def test_undo_with_empty_history_says_so(app):
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    assert "Nothing to undo" in app.message_text
+
+
+def test_undoing_a_delete_brings_the_state_back_safely(app):
+    app.editor.select("q1")
+    app._delete_selected_state()
+    assert "q1" not in app.editor.automaton.states
+
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    assert "q1" in app.editor.automaton.states
+    assert app.editor.selection is None, "the stale selection stays cleared"
+    pump(app, frames=5)
+
+
+def test_right_click_on_an_edge_offers_its_symbols(app):
+    """Transitions used to be uneditable from the canvas entirely."""
+    a = app.editor.position_of("q0")
+    b = app.editor.position_of("q1")
+    mid = app.renderer.camera.world_to_screen(
+        ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2))
+
+    click(app, (int(mid[0]), int(mid[1])), button=3)
+
+    menu = app.ui_manager.context_menu
+    assert menu is not None
+    labels = [item[0] for item in menu.items]
+    assert any(label.startswith("Remove '") for label in labels)
+
+
+def test_removing_a_symbol_from_an_edge(app):
+    assert app.editor.automaton.target("q0", "b") == "q1"
+    app._handle_context_menu_action("unedge:bq0")
+
+    assert app.editor.automaton.target("q0", "b") is None
+    assert "Removed q0 --b--> q1" in app.message_text
+
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    assert app.editor.automaton.target("q0", "b") == "q1", "and it is undoable"
+
+
+def test_straighten_clears_the_arc(app):
+    app.editor.add_transition("q0", "a", "q2", arc=40.0)
+    assert app.editor.layout.arc_of("q0", "q2") == 40.0
+
+    app._handle_context_menu_action("straighten:2:q0q2")
+    assert app.editor.layout.arc_of("q0", "q2") == 0.0
+
+
+def test_rename_flow_end_to_end(app):
+    """Menu, prompt, typing, enter -- and the canvas shows the label."""
+    app._handle_context_menu_action("rename_prompt:q1")
+    assert app.ui_manager.file_prompt_mode == "rename"
+    assert app.ui_manager.rename_target == "q1"
+
+    for char in "even":
+        press(app, ord(char), char)
+    press(app, pygame.K_RETURN, "\r")
+
+    assert app.editor.automaton.label_of("q1") == "even"
+    node = next(n for n in app._build_scene().nodes if n.id == "q1")
+    assert node.label == "even"
+
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    assert app.editor.automaton.label_of("q1") == "q1", "rename is undoable"
+
+
+def test_the_prompt_opens_prefilled_with_the_current_label(app):
+    """A rename starts from what the state is called now, so a small edit is a
+    small edit. Enter without touching the field therefore keeps the label --
+    clearing it is what resets, and that is a separate deliberate act."""
+    app.editor.rename("q1", "even")
+    app._handle_context_menu_action("rename_prompt:q1")
+    assert app.ui_manager.file_prompt_text == "even"
+
+    press(app, pygame.K_RETURN, "\r")
+    assert app.editor.automaton.label_of("q1") == "even"
+
+
+def test_clearing_the_rename_field_resets_the_label(app):
+    app.editor.rename("q1", "even")
+    app._handle_context_menu_action("rename_prompt:q1")
+    while app.ui_manager.file_prompt_text:
+        press(app, pygame.K_BACKSPACE)
+
+    press(app, pygame.K_RETURN, "\r")
+    assert app.editor.automaton.label_of("q1") == "q1"
+
+
+def test_an_unlabelled_state_opens_an_empty_prompt(app):
+    """No label means nothing to edit -- the field starts empty rather than
+    pre-filled with the id, so typing does not have to clear it first."""
+    app._handle_context_menu_action("rename_prompt:q1")
+    assert app.ui_manager.file_prompt_text == ""
+
+
+def test_right_drag_pans_without_opening_a_menu(app):
+    start = canvas_point(app, 0.5)
+    offset_before = (app.renderer.camera.offset_x, app.renderer.camera.offset_y)
+
+    send(app, pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=start))
+    move(app, (start[0] + 60, start[1] + 40), buttons=(0, 0, 1))
+    move(app, (start[0] + 120, start[1] + 80), buttons=(0, 0, 1))
+    send(app, pygame.event.Event(pygame.MOUSEBUTTONUP, button=3,
+                                 pos=(start[0] + 120, start[1] + 80)))
+
+    assert (app.renderer.camera.offset_x,
+            app.renderer.camera.offset_y) != offset_before
+    assert app.ui_manager.context_menu is None, "a drag is not a click"
+
+
+def test_a_still_right_click_still_opens_the_menu(app):
+    click(app, canvas_point(app, 0.5), button=3)
+    assert app.ui_manager.context_menu is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 follow-ups: defects the verification pass found
+# ---------------------------------------------------------------------------
+
+
+def test_clearing_a_label_leaves_no_trace(app):
+    """Resetting a name must return the document to the value it had before the
+    name existed. Writing the id into `labels` instead renders identically but
+    compares unequal, which quietly dirtied the file and spent an undo slot on
+    a change with nothing to show for it."""
+    assert dict(app.editor.automaton.labels) == {}
+
+    app._handle_context_menu_action("rename_prompt:q1")
+    press(app, pygame.K_RETURN, "\r")
+
+    assert dict(app.editor.automaton.labels) == {}
+    assert not app.editor.dirty
+    assert not app.editor.can_undo
+
+
+def test_naming_a_state_its_own_id_is_not_an_edit(app):
+    app._handle_context_menu_action("rename_prompt:q1")
+    for char in "q1":
+        press(app, ord(char), char)
+    press(app, pygame.K_RETURN, "\r")
+
+    assert dict(app.editor.automaton.labels) == {}
+    assert not app.editor.dirty
+
+
+def test_a_cleared_label_leaves_a_clean_saved_file(app):
+    """The residue outlived the session: it was written to disk and came back."""
+    app.editor.rename("q1", "even")
+    labelled = serialize.to_dict(app.editor.document)["automaton"]["labels"]
+    assert labelled == {"q1": "even"}
+
+    app.editor.rename("q1", "")
+    assert serialize.to_dict(app.editor.document)["automaton"]["labels"] == {}
+
+
+def test_undo_still_works_while_the_test_field_has_focus(app):
+    """Ctrl+Z is the app's only undo, and pressing enter to run a string leaves
+    the field focused -- so undo used to go silently dead in the most ordinary
+    flow there is: edit, test a string, undo."""
+    press(app, pygame.K_SPACE, " ")
+    after = app.editor.document
+    app.ui_manager.input_active = True
+
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    assert app.editor.document != after
+    chord(app, pygame.K_y, pygame.KMOD_CTRL)
+    assert app.editor.document == after
+
+
+def test_a_focused_field_still_swallows_plain_keys(app):
+    """The exemption is for chords only: an unmodified key is text."""
+    app.ui_manager.input_active = True
+    before = app.editor.document
+    press(app, pygame.K_SPACE, " ")
+    assert app.editor.document == before
+
+
+def test_a_context_menu_is_nudged_back_onto_the_screen(app):
+    """Rows are drawn and hit-tested from one stored position, so a row pushed
+    past the window edge is not merely invisible -- no mouse position can ever
+    reach it, and there is no keyboard fallback."""
+    ui = app.ui_manager
+    items = [(f"Item {i}", f"noop:{i}") for i in range(12)]
+    ui.show_context_menu((ui.screen_width - 4, ui.screen_height - 10), items)
+
+    rect = ui._context_menu_rect()
+    assert rect.left >= 0 and rect.top >= 0
+    assert rect.right <= ui.screen_width and rect.bottom <= ui.screen_height
+
+    height = ui_manager_module.CONTEXT_MENU_ITEM_HEIGHT
+    for i, (_, action) in enumerate(items):
+        centre = (rect.x + 5, rect.y + i * height + height // 2)
+        assert ui._handle_context_menu_click(centre) == action
+
+
+def test_the_state_menu_keeps_delete_reachable_low_on_the_canvas(app):
+    """The real case: 'Rename...' grew the state menu to seven rows, which was
+    enough to push 'Delete state' off the bottom for a state sitting low."""
+    ui = app.ui_manager
+    app._show_state_context_menu((300, ui.screen_height - 8), "q1")
+
+    rect = ui._context_menu_rect()
+    assert rect.bottom <= ui.screen_height
+
+    height = ui_manager_module.CONTEXT_MENU_ITEM_HEIGHT
+    last = len(ui.context_menu.items) - 1
+    centre = (rect.x + 5, rect.y + last * height + height // 2)
+    assert ui._handle_context_menu_click(centre) == "delete_state:q1"
+
+
+def test_straighten_is_not_offered_on_a_self_loop(app):
+    """A self-loop's arc is stored but no renderer honours it, so the item
+    promised a change nothing could show -- while dirtying the document."""
+    app.editor.add_transition("q0", "a", "q0", arc=40.0)
+    app._show_edge_context_menu((400, 300), ("q0", "q0"))
+
+    labels = [item[0] for item in app.ui_manager.context_menu.items]
+    assert "Straighten" not in labels
+    assert any(label.startswith("Remove '") for label in labels)
+
+
+def test_straighten_on_a_two_way_pair_reports_what_it_did(app):
+    """Two arrows between the same pair keep an automatic bow so they stay
+    apart, so 'Edge straightened' described a line still visibly curved."""
+    app.editor.add_transition("q0", "a", "q2", arc=40.0)
+    app.editor.add_transition("q2", "a", "q0")
+
+    app._handle_context_menu_action("straighten:2:q0q2")
+    assert app.editor.layout.arc_of("q0", "q2") == 0.0
+    assert "Manual bend cleared" in app.message_text
+
+
+def test_a_state_id_containing_the_separator_straightens_the_right_edge(app):
+    """Ids are opaque and the format is advertised as hand-editable, so any
+    character chosen as a separator can occur inside one. Splitting on '>'
+    silently straightened a different edge; the payload carries a length."""
+    app.editor.replace(serialize.from_dict({
+        "version": serialize.VERSION,
+        "automaton": {
+            "states": ["a>b", "c", "a", "b>c"],
+            "alphabet": ["x"],
+            "initial": "a>b",
+            "accept": [],
+            "transitions": [["a>b", "x", "c"], ["a", "x", "b>c"]],
+            "labels": {},
+        },
+        "layout": {
+            "positions": {"a>b": [0.0, 0.0], "c": [200.0, 0.0],
+                          "a": [0.0, 200.0], "b>c": [200.0, 200.0]},
+            "arcs": [["a>b", "c", 55.0], ["a", "b>c", 33.0]],
+        },
+        "next_id": 4,
+    }), None)
+
+    app._show_edge_context_menu((400, 300), ("a>b", "c"))
+    straighten = next(item[1] for item in app.ui_manager.context_menu.items
+                      if item[0] == "Straighten")
+    app._handle_context_menu_action(straighten)
+
+    assert app.editor.layout.arc_of("a>b", "c") == 0.0
+    # Splitting on the first '>' would have named ("a", "b>c") -- a real edge,
+    # so the old encoding flattened the wrong arrow and claimed success.
+    assert app.editor.layout.arc_of("a", "b>c") == 33.0
+
+
+def test_the_rename_field_stops_at_the_limit(app):
+    """A label has a circle to fit in; a path does not."""
+    app._handle_context_menu_action("rename_prompt:q1")
+    for _ in range(ui_manager_module.RENAME_LABEL_LIMIT + 30):
+        press(app, ord("x"), "x")
+
+    assert len(app.ui_manager.file_prompt_text) == ui_manager_module.RENAME_LABEL_LIMIT
+
+
+def test_elide_shortens_only_what_does_not_fit(app):
+    font = app.renderer.fonts.scaled("state", 1.0)
+    budget = default_state_radius() * 1.7
+
+    assert renderer_module._elide(font, "q0", budget) == "q0"
+
+    elided = renderer_module._elide(font, "even number of bs", budget)
+    assert elided.endswith("…") and elided != "even number of bs"
+    assert font.size(elided)[0] <= budget
+
+
+def test_a_long_label_is_elided_when_the_node_is_drawn(app, monkeypatch):
+    """Left alone the label is blitted at full width over whatever is behind
+    it -- a long name painted a band clean across the diagram, on top of the
+    very transitions it described. Pins the wiring, not just the helper: the
+    helper existing proves nothing if the draw path does not call it."""
+    seen = []
+    original = renderer_module._elide
+
+    def spy(font, text, budget):
+        seen.append((text, budget))
+        return original(font, text, budget)
+
+    monkeypatch.setattr(renderer_module, "_elide", spy)
+    app.editor.rename("q1", "even number of bs")
+    pump(app, frames=1)
+
+    assert any(text == "even number of bs" and budget > 0 for text, budget in seen)
 
 
 def test_set_initial_ignores_unknown_states(app):

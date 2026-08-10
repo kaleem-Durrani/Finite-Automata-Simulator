@@ -131,6 +131,8 @@ class AutomatonSimulator:
 
         self.panning = False
         self.pan_start = (0, 0)
+        self._right_press: Optional[Tuple[int, int]] = None
+        self._right_dragged = False
 
         self._loop_angle_cache: Dict[str, float] = {}
 
@@ -213,7 +215,11 @@ class AutomatonSimulator:
             self.panning = True
             self.pan_start = event.pos
         elif event.button == 3:
-            self._handle_right_click(event.pos)
+            # Deferred: a right-drag pans (middle-button-only panning is
+            # miserable on a trackpad), so the menu waits for release and only
+            # opens if the button never travelled.
+            self._right_press = event.pos
+            self._right_dragged = False
 
     def _handle_mouse_up(self, event: pygame.event.Event) -> None:
         if event.button == 1:
@@ -221,8 +227,27 @@ class AutomatonSimulator:
                 self._update_caption()
         elif event.button == 2:
             self.panning = False
+        elif event.button == 3:
+            press, self._right_press = self._right_press, None
+            if press is not None and not self._right_dragged:
+                self._handle_right_click(press)
+            self._right_dragged = False
 
     def _handle_mouse_motion(self, event: pygame.event.Event) -> None:
+        if self._right_press is not None and event.buttons[2]:
+            moved = (abs(event.pos[0] - self._right_press[0])
+                     + abs(event.pos[1] - self._right_press[1]))
+            if self._right_dragged or moved > 5:
+                if not self._right_dragged:
+                    self._right_dragged = True
+                    self.pan_start = self._right_press
+                dx = event.pos[0] - self.pan_start[0]
+                dy = event.pos[1] - self.pan_start[1]
+                self.renderer.camera.pan(dx, dy)
+                self.pan_start = event.pos
+                self._sync_camera_targets()
+                return
+
         if self.panning:
             dx = event.pos[0] - self.pan_start[0]
             dy = event.pos[1] - self.pan_start[1]
@@ -288,8 +313,44 @@ class AutomatonSimulator:
         clicked = self._state_at(pos)
         if clicked:
             self._show_state_context_menu(pos, clicked)
+            return
+
+        # An edge, if the click landed near enough to one of the drawn curves.
+        world = self._world(pos)
+        positions = self.editor.positions()
+        paths = self._edge_paths(positions)
+        edge = geometry.nearest_edge(world, paths,
+                                     within=14.0 / max(0.4, self.renderer.camera.zoom))
+        if edge is not None:
+            self._show_edge_context_menu(pos, edge)
         else:
             self._show_general_context_menu(pos)
+
+    def _show_edge_context_menu(self, pos: Tuple[int, int],
+                                edge: Tuple[str, str]) -> None:
+        """A menu for one drawn edge: remove any of its symbols, or straighten.
+
+        Transitions used to be uneditable from the canvas at all -- the only
+        way to remove one was to delete a state.
+        """
+        source, target = edge
+        symbols = sorted(self.editor.automaton.grouped_transitions().get(edge, ()))
+        items: List[Tuple[Any, ...]] = []
+        for symbol in symbols:
+            # The symbol is one character, so it travels first in the payload
+            # and the rest is unambiguously the state id.
+            items.append((f"Remove '{symbol}'", f"unedge:{symbol}{source}"))
+        # A self-loop stores an arc that no renderer honours, so offering to
+        # straighten one promises a change nothing can show.
+        if source != target and self.editor.layout.arc_of(source, target):
+            items.append(("---", ""))
+            # The id's length travels with the payload. State ids are opaque,
+            # so any character picked as a separator can occur inside one, and
+            # splitting on it would quietly straighten a different edge.
+            items.append(("Straighten",
+                          f"straighten:{len(source)}:{source}{target}"))
+        if items:
+            self.ui_manager.show_context_menu(pos, items)
 
     # ------------------------------------------------------------------
     # Keyboard
@@ -297,6 +358,17 @@ class AutomatonSimulator:
 
     def _handle_key_down(self, event: pygame.event.Event) -> None:
         """Handle key down events the UI did not consume."""
+        # Chords first: a plain 'z' must not undo, and Ctrl+Z must not fall
+        # through to any letter shortcut.
+        if event.mod & pygame.KMOD_CTRL:
+            if event.key == pygame.K_z and (event.mod & pygame.KMOD_SHIFT):
+                self._redo()
+            elif event.key == pygame.K_z:
+                self._undo()
+            elif event.key == pygame.K_y:
+                self._redo()
+            return
+
         if event.key == pygame.K_SPACE:
             self._add_state_at_center()
         elif event.key == pygame.K_DELETE:
@@ -353,6 +425,8 @@ class AutomatonSimulator:
                 self._complete_automaton()
             elif action == 'focus_states':
                 self._focus_states(value)
+            elif action == 'rename_state':
+                self._rename_state(*value)
             elif action == 'symbol_add':
                 self._add_symbol(value)
             elif action == 'symbol_added':
@@ -439,6 +513,30 @@ class AutomatonSimulator:
                   if replaced else "")
         self._show_message(f"{state} now loops on {alphabet}{detail}")
 
+    def _rename_state(self, state: str, label: str) -> None:
+        if not self.editor.rename(state, label):
+            return
+        self._after_edit()
+        shown = label.strip() or state
+        self._show_message(f"{state} is now labelled '{shown}'")
+
+    def _undo(self) -> None:
+        """Step the document back one edit, saying which one."""
+        action = self.editor.undo()
+        if action is None:
+            self._show_message("Nothing to undo")
+            return
+        self._after_edit()
+        self._show_message(f"Undid {action}")
+
+    def _redo(self) -> None:
+        action = self.editor.redo()
+        if action is None:
+            self._show_message("Nothing to redo")
+            return
+        self._after_edit()
+        self._show_message(f"Redid {action}")
+
     def _complete_automaton(self) -> None:
         """One click from "your machine is incomplete" to a total automaton.
 
@@ -521,6 +619,7 @@ class AutomatonSimulator:
             ("Accepting", f"toggle_accept:{state}", state in automaton.accept),
             ("Initial state", f"set_initial:{state}", state == automaton.initial),
             ("---", ""),
+            ("Rename...", f"rename_prompt:{state}"),
             ("Make a trap", f"make_trap:{state}"),
             ("---", ""),
             ("Delete state", f"delete_state:{state}"),
@@ -565,6 +664,31 @@ class AutomatonSimulator:
             self.editor.select(state)
             self._after_edit()
             self._show_message(f"Added {state}")
+        elif verb == "rename_prompt":
+            if payload in self.editor.automaton.states:
+                self.ui_manager.show_rename_prompt(
+                    payload, self.editor.automaton.label_of(payload))
+        elif verb == "unedge":
+            symbol, source = payload[0], payload[1:]
+            target = self.editor.automaton.target(source, symbol)
+            self.editor.remove_transition(source, symbol)
+            self._after_edit()
+            self._show_message(f"Removed {source} --{symbol}--> {target}")
+        elif verb == "straighten":
+            count, _, rest = payload.partition(":")
+            source, target = rest[:int(count)], rest[int(count):]
+            document = fsa.Document(
+                self.editor.document.automaton,
+                self.editor.document.layout.with_arc(source, target, 0.0),
+                self.editor.document.next_id)
+            self.editor.apply(document, action=f"straighten {source}->{target}")
+            self._after_edit()
+            # A two-way pair keeps an automatic bow so the two arrows stay
+            # apart. Reporting "straightened" there would describe a line the
+            # user can plainly see is still curved.
+            twinned = (target, source) in self.editor.automaton.grouped_transitions()
+            self._show_message("Manual bend cleared" if twinned
+                               else "Edge straightened")
         elif verb == "fit_view":
             self._fit_to_content()
 

@@ -122,3 +122,12 @@ individual flags per module; run `mypy --strict <pkg>` as its own step.*
 **`pip install` without `--user` half-succeeds on this machine** and leaves a
 broken package that later installs consider satisfied. See the note in the
 project memory. *Use `--user` on the first attempt.*
+
+**A stray control byte in a source file breaks more than the parse.**
+Two `press(app, pygame.K_RETURN, "\r")` calls were written with a literal CR
+byte where the two-character escape was meant. Python ends a line at a bare CR,
+so the string never closed and the *whole* suite stopped collecting — 503 tests
+reported as one collection error. The same two bytes made the file mixed-ending,
+so git gave up normalising it and rendered a 2,500-line rewrite that buried the
+162 lines actually added. One cause, two symptoms that look unrelated. *When a
+diff is inexplicably whole-file, read the bytes before reading the content.*

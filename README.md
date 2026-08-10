@@ -48,14 +48,19 @@ python main.py
 |---|---|
 | Left click | Select a state, or drag it |
 | Shift + left click | Start creating a transition (then click the target state) |
-| Right click | Open a context menu |
-| Middle click + drag | Pan the view |
+| Right click | Open a context menu for a state, a transition arrow, or the canvas |
+| Right or middle drag | Pan the view |
 | Scroll wheel | Zoom in/out |
+
+A right *drag* pans and a right *click* opens a menu; the menu waits for the button to come up and
+only appears if the pointer never travelled. Panning with the right button matters on a trackpad,
+where there is no middle button to hold.
 
 ### Keyboard
 
 | Key | Effect |
 |---|---|
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo the last edit (`Ctrl+Shift+Z` also redoes) |
 | `Space` | Add a new state at the centre of the view |
 | `Delete` | Remove the selected state |
 | `Q` | Toggle the selected state as accepting |
@@ -69,9 +74,13 @@ Typing a symbol that is in the palette selects it for the next transition.
 
 ### Context menu
 
-Right-click a state to toggle whether it accepts, make it the initial state, turn it into a trap,
-or delete it. The toggles show what the state already is. Right-click empty canvas to add a state
-there or fit the view.
+Right-click a state to toggle whether it accepts, make it the initial state, rename it, turn it
+into a trap, or delete it. The toggles show what the state already is. Right-click empty canvas to
+add a state there or fit the view.
+
+Right-click a transition arrow to remove any one of the symbols travelling along it, or to
+straighten a curved edge. A rename sets a *display label* only: the state keeps its id, so
+transitions and saved files are unaffected, and clearing the field puts the id back on screen.
 
 "Make a trap" is an operation, not a label: it removes the state's accepting status and points
 every symbol back at itself, which genuinely traps it. It then renders as a trap because it *is*

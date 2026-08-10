@@ -24,10 +24,20 @@ Three things here were wrong in the previous renderer and are fixed:
 """
 
 import math
-from typing import List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Mapping, Optional, Sequence, Tuple, TypeVar
+
+if TYPE_CHECKING:
+    # The type checker's spelling of "sortable". The module only exists inside
+    # the checker, so the import must not run -- and the engine stays
+    # dependency-free either way.
+    from _typeshed import SupportsRichComparison
 
 Point = Tuple[float, float]
 Path = List[Point]
+
+# Edge keys must sort, because nearest_edge breaks ties by key order; the
+# bound is what lets mypy accept sorted() over them.
+KEY = TypeVar("KEY", bound="SupportsRichComparison")
 
 MIN_SEGMENTS = 10
 MAX_SEGMENTS = 72
@@ -387,3 +397,60 @@ def auto_arc(source_id: str, target_id: str, bidirectional: bool,
     """
     del source_id, target_id  # kept for call-site clarity
     return magnitude if bidirectional else 0.0
+
+
+# ----------------------------------------------------------------------
+# Hit-testing
+# ----------------------------------------------------------------------
+
+def _segment_distance(point: Point, a: Point, b: Point) -> float:
+    """Distance from ``point`` to the segment from ``a`` to ``b``.
+
+    The projection parameter is clamped to the segment, so beyond either end
+    the answer is the distance to that endpoint -- projecting onto the
+    infinite line would let a click far past a short edge still select it.
+    """
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    span_sq = dx * dx + dy * dy
+    if span_sq < 1e-12:
+        return distance(point, a)
+    t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / span_sq
+    t = max(0.0, min(1.0, t))
+    return distance(point, (a[0] + dx * t, a[1] + dy * t))
+
+
+def distance_to_path(point: Point, path: Sequence[Point]) -> float:
+    """The minimum distance from a point to a polyline.
+
+    Measured by projection onto each segment, not to the sampled vertices.
+    Segment counts are clamped (``MAX_SEGMENTS``), so a long straight edge is
+    built from segments tens of units long, and vertex distance halfway along
+    one overestimates badly -- which would make the middle of an edge, the
+    natural place to click it, register as a miss.
+    """
+    if not path:
+        return math.inf
+    if len(path) == 1:
+        return distance(point, path[0])
+    return min(_segment_distance(point, path[i], path[i + 1])
+               for i in range(len(path) - 1))
+
+
+def nearest_edge(point: Point, paths: Mapping[KEY, Sequence[Point]],
+                 within: float) -> Optional[KEY]:
+    """The edge whose path passes closest to ``point``, if within range.
+
+    This is the right-click hit-test: the app hands it every drawn edge as
+    ``{(source, target): path}`` and opens a menu for whichever comes back.
+    Keys are visited in sorted order and only a strictly closer path replaces
+    the best so far, so an exact tie -- two parallel edges clicked dead
+    between them -- resolves to the same edge every time, not to whichever
+    the mapping happened to yield first.
+    """
+    best_key: Optional[KEY] = None
+    best = math.inf
+    for key in sorted(paths):
+        span = distance_to_path(point, paths[key])
+        if span < best:
+            best_key, best = key, span
+    return best_key if best <= within else None

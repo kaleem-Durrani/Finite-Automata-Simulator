@@ -37,11 +37,13 @@ HELP_LINES = [
     "Mouse Controls:",
     "- Left Click: Select states/UI",
     "- Shift+Click: Start transition",
-    "- Right Click: Context menu",
-    "- Middle Click+Drag: Pan view",
+    "- Right Click: Menu for a state",
+    "  or a transition arrow",
+    "- Right/Middle Drag: Pan view",
     "- Scroll Wheel: Zoom",
     "",
     "Keyboard Shortcuts:",
+    "- Ctrl+Z / Ctrl+Y: Undo / Redo",
     "- Space: Add state at center",
     "- Delete: Remove selected state",
     "- Q: Toggle accepting",
@@ -53,6 +55,14 @@ HELP_LINES = [
     "- Select symbol from toolbar",
     "- Shift+click source state",
     "- Click target state",
+    "",
+    "Editing:",
+    "- Right-click a state to",
+    "  rename it (a display label;",
+    "  the id does not change)",
+    "- Right-click an arrow to",
+    "  remove one of its symbols,",
+    "  or straighten a curve",
     "",
     "Testing Strings:",
     "- Enter string in input field",
@@ -75,6 +85,13 @@ CONTEXT_MENU_WIDTH = 168
 CONTEXT_MENU_ITEM_HEIGHT = 27
 # Left inset for item labels, leaving room for the toggle marker.
 CONTEXT_MENU_GUTTER = 28
+
+#: Breathing room between a nudged context menu and the window edge.
+CONTEXT_MENU_MARGIN = 8
+
+#: Longest display name a state may be given. In the same spirit as the 50 the
+#: test string gets: enough for "even number of bs", short of a caption.
+RENAME_LABEL_LIMIT = 24
 
 
 @dataclass
@@ -137,9 +154,10 @@ class UIManager:
         self.adding_symbol = False
         self.new_symbol_input = ""
 
-        # Filename prompt state ('save' | 'load' | None)
+        # Filename prompt state ('save' | 'load' | 'rename' | None)
         self.file_prompt_mode: Optional[str] = None
         self.file_prompt_text = ""
+        self.rename_target = ""
 
         # Confirmation dialog state; confirm_intent names the action being
         # guarded so the app layer decides what "yes" means.
@@ -378,7 +396,15 @@ class UIManager:
         if event.type == pygame.MOUSEMOTION:
             return self._handle_mouse_motion(event)
         if event.type == pygame.KEYDOWN:
-            return self._handle_key_down(event), self.is_keyboard_captured()
+            # A modifier chord is never text. Every text field here ignores
+            # Ctrl combinations anyway (their unicode is a control character,
+            # which is not printable), so reporting one as captured only ever
+            # loses it: typing a string and pressing enter leaves the field
+            # focused, which used to make Ctrl+Z -- the app's only undo -- do
+            # nothing at all, silently, in the most ordinary flow there is.
+            captured = (self.is_keyboard_captured()
+                        and not event.mod & pygame.KMOD_CTRL)
+            return self._handle_key_down(event), captured
         if event.type == pygame.KEYUP:
             return self._handle_key_up(event), False
         if event.type == pygame.MOUSEWHEEL:
@@ -677,6 +703,17 @@ class UIManager:
         self.file_prompt_text = default_name
         self.input_active = False
 
+    def show_rename_prompt(self, state: str, current_label: str):
+        """Open the text prompt to rename a state.
+
+        Rides the filename prompt's machinery -- same modal frame, same keys --
+        because a rename is the same interaction with a different verb.
+        """
+        self.file_prompt_mode = "rename"
+        self.rename_target = state
+        self.file_prompt_text = "" if current_label == state else current_label
+        self.input_active = False
+
     def hide_file_prompt(self):
         """Close the filename prompt."""
         self.file_prompt_mode = None
@@ -717,14 +754,22 @@ class UIManager:
             mode = self.file_prompt_mode
             name = self.file_prompt_text.strip()
             self.hide_file_prompt()
-            if name:
+            if mode == 'rename':
+                # An empty name is a deliberate reset to the state's own id,
+                # so it is not a cancel.
+                actions['rename_state'] = (self.rename_target, name)
+            elif name:
                 actions['save_to_path' if mode == 'save' else 'load_to_path'] = name
             else:
                 actions['file_prompt_cancel'] = True
         elif event.key == pygame.K_BACKSPACE:
             self.file_prompt_text = self.file_prompt_text[:-1]
-        elif event.unicode.isprintable() and len(self.file_prompt_text) < 120:
-            self.file_prompt_text += event.unicode
+        elif event.unicode.isprintable():
+            # A path may reasonably be long; a state's display name has a
+            # circle to fit inside, and the renderer will elide what does not.
+            limit = RENAME_LABEL_LIMIT if self.file_prompt_mode == "rename" else 120
+            if len(self.file_prompt_text) < limit:
+                self.file_prompt_text += event.unicode
 
         return actions
 
@@ -904,14 +949,18 @@ class UIManager:
         return rect
 
     def _draw_file_prompt(self):
-        """Draw the filename prompt."""
-        verb = "Save as" if self.file_prompt_mode == 'save' else "Load file"
-        rect = self._draw_modal_frame(440, 160, verb)
+        """Draw the filename prompt (or its rename variant)."""
+        titles = {"save": "Save as", "load": "Load file",
+                  "rename": f"Rename {getattr(self, 'rename_target', '')}"}
+        rect = self._draw_modal_frame(440, 160,
+                                      titles.get(self.file_prompt_mode, ""))
 
         palette = self.theme.palette
-        hint = self.fonts.ui("small").render(
-            "Relative to the project folder. '.json' is added if omitted.",
-            True, palette.text_muted)
+        if self.file_prompt_mode == "rename":
+            hint_text = "A display label. Leave empty to use the state's id."
+        else:
+            hint_text = "Relative to the project folder. '.json' is added if omitted."
+        hint = self.fonts.ui("small").render(hint_text, True, palette.text_muted)
         self.screen.blit(hint, (rect.x + self.theme.space.lg, rect.y + 50))
 
         field = pygame.Rect(rect.x + self.theme.space.lg, rect.y + 74,
@@ -1596,13 +1645,28 @@ class UIManager:
     def show_context_menu(self, position: Tuple[int, int],
                           items: List[Tuple[Any, ...]]):
         """
-        Show a context menu at the specified position.
+        Show a context menu at the specified position, nudged to fit on screen.
+
+        Drawing and hit-testing both derive their rows from this one stored
+        position, so a row pushed past the bottom edge is not merely invisible:
+        no mouse position can ever land on it, and there is no keyboard
+        fallback. Right-clicking low on the canvas would otherwise lose the
+        last items of the menu -- "Delete state" among them.
 
         Args:
             position: (x, y) position to show the menu
             items: List of (label, action) tuples
         """
-        self.context_menu = ContextMenu(position, items)
+        height = len(items) * CONTEXT_MENU_ITEM_HEIGHT
+        margin = CONTEXT_MENU_MARGIN
+        x, y = position
+        # Clamped rather than flipped: the menu stays under the pointer, and a
+        # menu taller than the window still starts at the top, showing as much
+        # as there is room for instead of hanging off both ends. The margin
+        # keeps a nudged menu from sitting flush against the window edge.
+        x = max(margin, min(x, self.screen_width - CONTEXT_MENU_WIDTH - margin))
+        y = max(margin, min(y, self.screen_height - height - margin))
+        self.context_menu = ContextMenu((x, y), items)
 
     def hide_context_menu(self):
         """Hide the context menu."""

@@ -282,3 +282,78 @@ def test_label_anchor_sits_off_the_line():
     on_line = g.label_anchor(path, 0.0)
     offset = g.label_anchor(path, 14.0)
     assert g.distance(on_line, offset) == pytest.approx(14.0, abs=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Hit-testing
+# ---------------------------------------------------------------------------
+
+
+def test_hit_distance_projects_onto_the_segment():
+    """A click beside the middle of an edge must read the perpendicular gap.
+
+    Distance to the nearest *vertex* of this two-point path reads over 100 --
+    more than twice the true 10 -- so a vertex-only implementation cannot pass.
+    """
+    path = [SOURCE, TARGET]
+    mid = g.lerp(SOURCE, TARGET, 0.5)
+    probe = (mid[0], mid[1] + 10.0)
+
+    assert g.distance_to_path(probe, path) == pytest.approx(10.0)
+    vertex_distance = min(g.distance(probe, SOURCE), g.distance(probe, TARGET))
+    assert vertex_distance > 2 * 10.0
+
+
+def test_hit_distance_follows_a_curved_edge():
+    """The hit-test must track the bow, not the chord between the endpoints."""
+    path = g.edge_path(SOURCE, TARGET, RADIUS, RADIUS, 60.0)
+
+    on_curve = g.point_at(path, 0.5)
+    assert g.distance_to_path(on_curve, path) == pytest.approx(0.0, abs=1e-6)
+
+    # The chord midpoint sits well off the curve -- roughly the bow depth.
+    chord_mid = g.lerp(path[0], path[-1], 0.5)
+    off_curve = g.distance_to_path(chord_mid, path)
+    assert 25.0 < off_curve < 60.0
+
+
+def test_hit_distance_beyond_the_endpoints_is_to_the_endpoint():
+    path = [(0.0, 0.0), (100.0, 0.0)]
+    assert g.distance_to_path((150.0, 0.0), path) == pytest.approx(50.0)
+    # 3-4-5 off the start; projecting onto the infinite line would read 40.
+    assert g.distance_to_path((-30.0, 40.0), path) == pytest.approx(50.0)
+
+
+def test_hit_distance_degenerate_paths():
+    assert g.distance_to_path((10.0, 20.0), []) == math.inf
+    assert g.distance_to_path((3.0, 4.0), [(0.0, 0.0)]) == pytest.approx(5.0)
+
+
+def test_nearest_edge_picks_the_closer_path():
+    upper = g.edge_path((200.0, 150.0), (400.0, 150.0), RADIUS, RADIUS, 0.0)
+    lower = g.edge_path((200.0, 250.0), (400.0, 250.0), RADIUS, RADIUS, 0.0)
+    paths = {("q0", "q1"): upper, ("q1", "q2"): lower}
+
+    assert g.nearest_edge((300.0, 160.0), paths, 20.0) == ("q0", "q1")
+    assert g.nearest_edge((300.0, 240.0), paths, 20.0) == ("q1", "q2")
+
+
+def test_nearest_edge_returns_none_when_nothing_is_in_range():
+    paths = {("q0", "q1"): g.edge_path(SOURCE, TARGET, RADIUS, RADIUS, 0.0)}
+    assert g.nearest_edge((300.0, 500.0), paths, 12.0) is None
+
+
+def test_nearest_edge_breaks_ties_deterministically():
+    """Two edges exactly as close must resolve by key order, not dict order."""
+    path = [(0.0, 0.0), (100.0, 0.0)]
+    # Insertion order deliberately disagrees with sorted order.
+    paths = {"b": list(path), "a": list(path)}
+    assert g.nearest_edge((50.0, 5.0), paths, 10.0) == "a"
+
+
+def test_a_self_loop_is_hittable():
+    """The app hit-tests loops through the same mapping as ordinary edges."""
+    path = g.self_loop_path(SOURCE, RADIUS)
+    apex = g.point_at(path, 0.5)
+    probe = g.offset(apex, g.direction(SOURCE, apex), 1.5)
+    assert g.distance_to_path(probe, path) <= 2.0
