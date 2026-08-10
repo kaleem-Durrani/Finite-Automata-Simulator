@@ -16,6 +16,7 @@ Every operation returns a new Document. Undo is therefore ``stack.append(doc)``.
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Tuple
 
+from fsa import ops
 from fsa.automaton import DFA
 from fsa.layout import PLACEMENT_STEP, Layout, Point
 from fsa.symbols import StateId, Symbol
@@ -132,6 +133,20 @@ class Document:
         for symbol in sorted(automaton.alphabet):
             automaton = automaton.with_transition(state_id, symbol, state_id)
         return Document(automaton, self.layout, self.next_id)
+
+    def complete(self, trap_id: Optional[StateId] = None) -> Tuple["Document", Optional[StateId]]:
+        """Make delta total; see :func:`fsa.ops.complete`.
+
+        Goes through :meth:`with_automaton` so an invented trap state gets
+        grid coordinates instead of landing at the origin. The trap's id
+        comes back with the document because the caller almost always wants
+        to point at what the fix created; ``(self, None)`` means there was
+        nothing to fix.
+        """
+        automaton, trap = ops.complete(self.automaton, trap_id)
+        if trap is None:
+            return self, None
+        return self.with_automaton(automaton), trap
 
     # ------------------------------------------------------------------
     # Alphabet
