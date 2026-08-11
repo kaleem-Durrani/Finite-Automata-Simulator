@@ -26,6 +26,10 @@ then step through how a string is processed, one symbol at a time.
   automatically, and labels on plates so they stay legible where edges cross
 - **Configurable symbol palette** — `a`, `b`, `0`, `1` by default; more can be added at runtime
 - **Context menus** — right-click a state to change its type or delete it
+- **Algorithms** — minimise (Moore, with the marking table available for display),
+  trim, complete, union / intersection / difference / complement, and an
+  equivalence check that returns the *shortest distinguishing word* when two
+  machines disagree
 - **JSON file format** — human-readable and hand-editable
 
 ## Requirements
@@ -102,7 +106,7 @@ mouse but never typed at — pressing `q` toggled accepting instead of choosing 
 
 Right-click a state to toggle whether it accepts, make it the initial state, rename it, turn it
 into a trap, or delete it. The toggles show what the state already is. Right-click empty canvas to
-add a state there or fit the view.
+add a state there, minimise or trim the machine, or fit the view.
 
 Right-click a transition arrow to remove any one of the symbols travelling along it, or to
 straighten a curved edge. A rename sets a *display label* only: the state keeps its id, so
@@ -149,13 +153,16 @@ three**, which is exactly the failure mode generating it prevents.
 The engine ships with a CLI that needs no display and no pygame:
 
 ```
-fsa test    machine.json 0110     # run a word; exit 0 accepted, 1 rejected
-fsa run     machine.json 0110     # ...and show every step
-fsa check   machine.json          # structural problems; exit 1 if any
-fsa show    machine.json          # the transition table
-fsa sample  machine.json -n 10    # words it accepts, shortest first
-fsa export  machine.json -f svg   # dot | tikz | svg
-fsa new     machine.json -a 0 1   # an empty automaton
+fsa test     machine.json 0110    # run a word; exit 0 accepted, 1 rejected
+fsa run      machine.json 0110    # ...and show every step
+fsa check    machine.json         # structural problems; exit 1 if any
+fsa show     machine.json         # the transition table
+fsa sample   machine.json -n 10   # words it accepts, shortest first
+fsa minimize machine.json         # merge states no word can tell apart
+fsa complete machine.json         # route undefined pairs to a trap
+fsa equiv    a.json b.json        # same language? exit 1 + a counterexample
+fsa export   machine.json -f svg  # dot | tikz | svg
+fsa new      machine.json -a 0 1  # an empty automaton
 fsa gui                           # the editor, from a checkout
 ```
 

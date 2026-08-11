@@ -140,6 +140,81 @@ def cmd_sample(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return OK
 
 
+def _write_document(document: "fsa.Document", path: Optional[str],
+                    out: TextIO, err: TextIO) -> int:
+    """Save a rebuilt document, or print it when no path was given."""
+    if path is None:
+        print(serialize.dumps(document), end="", file=out)
+        return OK
+    ok, error = serialize.save_or_error(document, path)
+    if not ok:
+        print(f"{PROGRAM}: {path}: {error}", file=err)
+        return USAGE
+    print(f"wrote {path}", file=out)
+    return OK
+
+
+def cmd_minimize(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Merge the states no word can tell apart."""
+    document = _load(args.file, err)
+    if document is None:
+        return USAGE
+
+    automaton = document.automaton
+    if automaton.initial is None:
+        print(f"{PROGRAM}: no initial state, so there is no language to "
+              f"preserve", file=err)
+        return USAGE
+
+    reduced = fsa.minimize(automaton)
+    print(f"{len(automaton.states)} states -> {len(reduced.states)}", file=out)
+    # New states, so new coordinates: nothing here was placed by a user.
+    rebuilt = fsa.Document(reduced, fsa.Layout.auto(reduced), document.next_id)
+    return _write_document(rebuilt, args.output, out, err)
+
+
+def cmd_complete(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Make delta total by routing undefined pairs to a trap."""
+    document = _load(args.file, err)
+    if document is None:
+        return USAGE
+
+    missing = len(analysis.missing_transitions(document.automaton))
+    completed, trap = document.complete()
+    if trap is None:
+        print("already complete", file=out)
+        return OK
+
+    print(f"added {trap} and routed {missing} missing "
+          f"transition{'s' if missing != 1 else ''} to it", file=out)
+    return _write_document(completed, args.output, out, err)
+
+
+def cmd_equiv(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Say whether two automata recognise the same language.
+
+    Exit 0 when they agree and 1 when they do not, so a marking script can
+    branch on the status without parsing anything -- and when they disagree,
+    print the shortest word that proves it. That word is the whole point: it
+    turns "wrong" into "wrong on this input".
+    """
+    left = _load(args.left, err)
+    right = _load(args.right, err)
+    if left is None or right is None:
+        return USAGE
+
+    witness = fsa.counterexample(left.automaton, right.automaton)
+    if witness is None:
+        print("equivalent", file=out)
+        return OK
+
+    print(f"differ on {witness or 'the empty string'}", file=out)
+    for name, document in ((args.left, left), (args.right, right)):
+        verdict = "accepts" if fsa.accepts(document.automaton, witness) else "rejects"
+        print(f"  {name} {verdict} it", file=out)
+    return NO
+
+
 def cmd_export(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Write the automaton as a diagram."""
     document = _load(args.file, err)
@@ -292,6 +367,23 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--rejected", action="store_true",
                         help="also list rejected words, labelled")
     sample.set_defaults(handler=cmd_sample)
+
+    minimize = subs.add_parser("minimize", help="merge indistinguishable states")
+    minimize.add_argument("file")
+    minimize.add_argument("-o", "--output",
+                          help="write here instead of printing the document")
+    minimize.set_defaults(handler=cmd_minimize)
+
+    complete = subs.add_parser("complete", help="route undefined pairs to a trap")
+    complete.add_argument("file")
+    complete.add_argument("-o", "--output",
+                          help="write here instead of printing the document")
+    complete.set_defaults(handler=cmd_complete)
+
+    equiv = subs.add_parser("equiv", help="compare two automata")
+    equiv.add_argument("left")
+    equiv.add_argument("right")
+    equiv.set_defaults(handler=cmd_equiv)
 
     export = subs.add_parser("export", help="write a diagram")
     export.add_argument("file")

@@ -1996,3 +1996,134 @@ def test_thirty_edits_then_thirty_undos_is_the_original(app):
     for _ in range(30):
         chord(app, pygame.K_z, pygame.KMOD_CTRL)
     assert app.editor.document == before
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: the algorithms, reachable from the interface
+# ---------------------------------------------------------------------------
+
+
+def redundant_document() -> fsa.Document:
+    """A machine with two states no word can tell apart: q1 and q2 both accept
+    everything from here on, so minimisation must merge them."""
+    document = fsa.Document()
+    for symbol in "ab":
+        document = document.add_symbol(symbol)
+    for _ in range(4):
+        document, _ = document.add_state((0.0, 0.0))
+
+    automaton = document.automaton.with_initial("q0")
+    automaton = automaton.with_accept("q1").with_accept("q2")
+    for source, symbol, target in [
+        ("q0", "a", "q1"), ("q0", "b", "q2"),
+        ("q1", "a", "q1"), ("q1", "b", "q1"),
+        ("q2", "a", "q2"), ("q2", "b", "q2"),
+        ("q3", "a", "q3"), ("q3", "b", "q3"),
+    ]:
+        automaton = automaton.with_transition(source, symbol, target)
+    return fsa.Document(automaton, fsa.Layout.auto(automaton), document.next_id)
+
+
+def menu_row(app: AutomatonSimulator, label: str):
+    """The centre of the open context menu's row with this label."""
+    menu = app.ui_manager.context_menu
+    assert menu is not None, "no context menu is open"
+    rect = context_menu.bounds(menu=menu)
+    height = context_menu.CONTEXT_MENU_ITEM_HEIGHT
+    index = next(i for i, item in enumerate(menu.items) if item.label == label)
+    return (rect.x + 5, rect.y + index * height + height // 2)
+
+
+def test_minimise_from_the_canvas_menu_reduces_and_keeps_the_language(app):
+    """Phase 9 exit criterion 5, driven through the real menu.
+
+    Not on the bundled demo: that machine is already minimal -- three states in
+    and three out -- so it could never show a reduction. Without a reducible
+    machine this criterion passes vacuously, which is exactly the failure it
+    was written to catch.
+    """
+    app.editor.replace(redundant_document(), None)
+    app.ui_manager.sync_symbols_with(app.editor.automaton)
+    before = app.editor.automaton
+    assert len(before.states) == 4
+
+    click(app, canvas_point(app, 0.5), button=3)
+    assert app.ui_manager.context_menu is not None
+    click(app, menu_row(app, "Minimise"))
+    pump(app, frames=5)
+
+    after = app.editor.automaton
+    assert len(after.states) < len(before.states)
+    assert fsa.equivalent(before, after), "minimising changed the language"
+
+
+def test_minimising_an_already_minimal_machine_says_so_and_changes_nothing(app):
+    """The demo is minimal, so the honest answer is to leave it alone."""
+    before = app.editor.document
+    app._minimize_automaton()
+
+    assert app.editor.document == before
+    assert "minimal" in app.message_text.lower()
+
+
+def test_minimise_gives_the_merged_states_coordinates(app):
+    """Exit criterion 6's reason for existing: the states minimisation emits
+    were never placed by anyone, so without a generated layout they would all
+    land on the origin in a heap."""
+    app.editor.replace(redundant_document(), None)
+    app._minimize_automaton()
+    pump(app, frames=5)
+
+    positions = app.editor.positions()
+    assert len(set(positions.values())) == len(positions), "states are stacked"
+
+
+def test_a_generated_machine_is_laid_out_and_fits_the_view(app):
+    """Phase 9 exit criterion 6, through the app: twelve generated states, no
+    two overlapping, and every one of them on screen after fit-to-content."""
+    document = fsa.Document()
+    for symbol in "ab":
+        document = document.add_symbol(symbol)
+    for _ in range(12):
+        document, _ = document.add_state((0.0, 0.0))
+    automaton = document.automaton.with_initial("q0").with_accept("q11")
+    ids = sorted(automaton.states, key=lambda s: int(s[1:]))
+    for index, state in enumerate(ids):
+        automaton = automaton.with_transition(state, "a", ids[(index + 1) % 12])
+        automaton = automaton.with_transition(state, "b", ids[index // 2])
+
+    app.editor.replace(
+        fsa.Document(automaton, fsa.Layout.auto(automaton), document.next_id),
+        None)
+    app._fit_to_content()
+    pump(app, frames=60)
+
+    positions = app.editor.positions()
+    assert len(positions) == 12
+
+    radius = default_state_radius()
+    placed = sorted(positions.items())
+    for i, (_a, first) in enumerate(placed):
+        for _b, second in placed[i + 1:]:
+            assert math.dist(first, second) >= 2 * radius
+
+    width, height = app.screen.get_size()
+    for state, point in positions.items():
+        x, y = app.renderer.camera.world_to_screen(point)
+        assert 0 <= x <= width, f"{state} is off screen horizontally"
+        assert 0 <= y <= height, f"{state} is off screen vertically"
+
+
+def test_trim_from_the_canvas_menu_drops_the_useless_states(app):
+    app.editor.replace(redundant_document(), None)
+    before = app.editor.automaton
+    assert "q3" in before.states, "q3 reaches nothing accepting"
+
+    click(app, canvas_point(app, 0.5), button=3)
+    click(app, menu_row(app, "Trim"))
+    pump(app, frames=5)
+
+    after = app.editor.automaton
+    assert "q3" not in after.states
+    for word in ["", "a", "b", "ab", "ba", "aab"]:
+        assert fsa.accepts(after, word) == fsa.accepts(before, word)

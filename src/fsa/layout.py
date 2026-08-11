@@ -11,13 +11,19 @@ in two places could disagree.
 
 Immutable, like everything else in the engine, with one deliberate exception
 noted on :meth:`Layout.with_position`.
+
+Because coordinates live outside the automaton, an automaton can exist without
+any -- which is the normal case for anything an algorithm builds rather than a
+user draws. :meth:`Layout.auto` is where those machines get somewhere to be.
 """
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from fsa.automaton import DFA
 from fsa.symbols import StateId
 
 Point = Tuple[float, float]
@@ -28,6 +34,24 @@ _EMPTY_ARCS: Mapping[Edge, float] = MappingProxyType({})
 
 #: Default spacing when placing a state automatically.
 PLACEMENT_STEP = 78.0
+
+#: The closest two automatically placed states are ever put, centre to centre.
+#:
+#: The GUI draws a state as a circle of radius 30 (``rendering.renderer``'s
+#: ``STATE_RADIUS``), so 60 is exactly where two of them touch. The number is
+#: written out here instead of imported because nothing under ``fsa`` may
+#: import the renderer -- the engine has no display dependency, and CI enforces
+#: it -- and the remaining 30 is what stops touching circles: it leaves the
+#: arrow between two neighbours somewhere to draw its symbols.
+AUTO_SEPARATION = 90.0
+
+#: How much wider than tall an automatic layout is.
+#:
+#: Columns get more room than rows because the horizontal gaps are where the
+#: arrows and their labels are drawn, while the vertical gaps hold nothing.
+#: Any value >= 1 keeps the separation promise intact, since two states in
+#: different columns are already a full column step apart in x alone.
+LAYER_ASPECT = 1.5
 
 #: Decimal places kept for coordinates.
 #:
@@ -197,3 +221,155 @@ class Layout:
             row, column = divmod(index, max(1, columns))
             placed[state] = (origin[0] + column * step, origin[1] + row * step)
         return Layout(placed)
+
+    @staticmethod
+    def auto(automaton: DFA,
+             algorithm: str = "bfs_layers",
+             origin: Point = (160.0, 160.0),
+             minimum_separation: float = AUTO_SEPARATION) -> "Layout":
+        """Place every state of an automaton, from scratch.
+
+        Nothing else in this program can position a state the user did not
+        position by hand, so an operation that *invents* states -- completion,
+        a product construction, the subset construction -- has nowhere to put
+        them: they all land on the origin in one pile, where hit-testing finds
+        only the topmost and the rest are lost. Every algorithm that returns a
+        new automaton needs this first.
+
+        ``"bfs_layers"`` gives each state a column chosen by its distance from
+        the initial state. An edge then normally points from one column to the
+        next, so the drawing reads left to right in the direction the
+        transitions actually go, and the initial state is where a reader looks
+        for it. Within a column, states are ordered by id and centred on a
+        common line.
+
+        States the initial state cannot reach have no distance to sort them
+        by, and neither has anything at all when there is no initial state.
+        They are not dropped -- a state with no coordinates is a state that
+        cannot be drawn, found or deleted -- but placed in a block after the
+        last layer, separated from it by one empty column so the picture says
+        what it means: these are not part of the machine's flow.
+
+        Args:
+            automaton: What to place. Only its states and transitions are
+                read, and nothing about it is changed.
+            algorithm: Which placement to use. ``"bfs_layers"`` is the only
+                one so far; anything else raises :class:`ValueError` rather
+                than quietly falling back, because a caller that named a
+                layout wants that layout and not a surprise.
+            origin: The top-left corner of the drawing -- not the position of
+                the first state. Columns are centred against each other, so
+                which state sits highest depends on the tallest column, and
+                pinning the initial state instead would push everything else
+                off the top of the view.
+            minimum_separation: The centre-to-centre distance no two states
+                are placed closer than; see :data:`AUTO_SEPARATION`. Rows are
+                spaced by exactly this, columns by ``LAYER_ASPECT`` times it.
+                Coordinates are rounded to :data:`PRECISION` when the layout
+                is built, so the guarantee is exact to within a thousandth of
+                a pixel.
+
+        Returns:
+            A layout holding a position for every state of ``automaton`` and
+            for nothing else, and no arc offsets: a drawing nobody has touched
+            yet has no bowed edges to remember. Identical automata give
+            identical layouts, in this run and in the next -- everything
+            iterated here comes out of a ``sorted`` call, because set order in
+            Python is not stable between processes.
+        """
+        if algorithm != "bfs_layers":
+            raise ValueError(
+                f"unknown layout algorithm {algorithm!r}; expected 'bfs_layers'")
+
+        columns: List[Tuple[StateId, ...]] = list(_bfs_layers(automaton))
+
+        on_the_spine = {state for column in columns for state in column}
+        orphans = tuple(sorted(
+            state for state in automaton.states if state not in on_the_spine))
+        if orphans:
+            if columns:
+                # An empty column places nothing but still costs a column of
+                # width, which is the gap that reads as "and now something
+                # else".
+                columns.append(())
+            columns.extend(_wrapped_columns(orphans))
+
+        column_step = minimum_separation * LAYER_ASPECT
+        placed: Dict[StateId, Point] = {}
+        for index, column in enumerate(columns):
+            x = index * column_step
+            top = -(len(column) - 1) * minimum_separation / 2
+            for row, state in enumerate(column):
+                placed[state] = (x, top + row * minimum_separation)
+
+        if not placed:
+            return Layout()
+
+        # Shift the finished drawing so its bounding box starts at the origin.
+        # Centring the columns puts half of a tall one above the line it was
+        # centred on, and a caller handed negative coordinates would have to
+        # scroll to find the machine it just built.
+        left = min(point[0] for point in placed.values())
+        highest = min(point[1] for point in placed.values())
+        return Layout({
+            state: (point[0] + origin[0] - left, point[1] + origin[1] - highest)
+            for state, point in placed.items()
+        })
+
+
+# ----------------------------------------------------------------------
+# Automatic layout, internals
+# ----------------------------------------------------------------------
+
+
+def _bfs_layers(automaton: DFA) -> Tuple[Tuple[StateId, ...], ...]:
+    """The reachable states, grouped by their BFS distance from the initial one.
+
+    Empty when there is no initial state: then nothing has a distance, and the
+    caller has to find a home for the whole state set.
+
+    Distances are what make the drawing readable, so they are measured the same
+    way :func:`fsa.analysis.reachable` measures reachability -- following delta
+    forwards, one edge at a time.
+    """
+    if automaton.initial is None:
+        return ()
+
+    initial: StateId = automaton.initial
+    depth: Dict[StateId, int] = {initial: 0}
+    queue = deque([initial])
+    while queue:
+        state = queue.popleft()
+        # Sorted, so the traversal does not depend on set order. The distances
+        # themselves would survive that, but a future change that used visit
+        # order for anything would silently start drawing a different picture
+        # on every run.
+        for symbol in sorted(automaton.alphabet):
+            target = automaton.target(state, symbol)
+            if target is None:
+                # delta is partial: no arrow on this symbol. That is a normal
+                # automaton, not an error, and the state simply has one fewer
+                # successor.
+                continue
+            if target not in depth:
+                depth[target] = depth[state] + 1
+                queue.append(target)
+
+    layers: List[List[StateId]] = [[] for _ in range(max(depth.values()) + 1)]
+    for state, distance in sorted(depth.items()):
+        layers[distance].append(state)
+    return tuple(tuple(layer) for layer in layers)
+
+
+def _wrapped_columns(states: Sequence[StateId]) -> Tuple[Tuple[StateId, ...], ...]:
+    """``states`` cut into roughly square columns.
+
+    One column would do, but an automaton whose initial state was deleted has
+    *every* state in here, and a dozen of them in a single column runs off the
+    bottom of any view. A square block stays on screen.
+    """
+    if not states:
+        return ()
+    rows = math.isqrt(len(states) - 1) + 1  # ceil(sqrt(n)), without floats
+    return tuple(tuple(states[start:start + rows])
+                 for start in range(0, len(states), rows))

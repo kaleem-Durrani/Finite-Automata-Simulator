@@ -192,6 +192,16 @@ class CompleteAutomaton(UiEvent):
     pass
 
 
+@dataclass(frozen=True)
+class MinimizeAutomaton(UiEvent):
+    """Merge the states no word can tell apart, and re-lay the result out."""
+
+
+@dataclass(frozen=True)
+class TrimAutomaton(UiEvent):
+    """Drop every state that cannot appear on an accepting run."""
+
+
 # ----------------------------------------------------------------------
 # Camera and messages
 # ----------------------------------------------------------------------

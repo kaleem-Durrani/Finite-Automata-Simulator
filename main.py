@@ -499,6 +499,8 @@ class AutomatonSimulator:
             events.PromptCancelled: lambda _e: self._show_message("Cancelled"),
             events.ToggleTheme: lambda _e: self._toggle_theme(),
             events.CompleteAutomaton: lambda _e: self._complete_automaton(),
+            events.MinimizeAutomaton: lambda _e: self._minimize_automaton(),
+            events.TrimAutomaton: lambda _e: self._trim_automaton(),
             events.FocusStates: lambda e: self._focus_states(list(e.states)),
             events.ShowMessage: lambda e: self._show_message(e.text),
             events.SymbolSelected: self._on_symbol_selected,
@@ -708,6 +710,53 @@ class AutomatonSimulator:
             f"Added {trap} and routed {before} missing "
             f"transition{'s' if before != 1 else ''} to it")
 
+    def _replace_automaton(self, automaton: fsa.DFA, action: str) -> None:
+        """Adopt a machine an algorithm produced, and give it coordinates.
+
+        Every construction in the algorithms layer emits states the user never
+        placed, so the document it goes into needs a layout generated for it --
+        without that they would all land on the origin in a heap. Hand-placed
+        coordinates cannot be kept: the states are new values, not the old ones
+        moved. A run in progress is stopped because its path names states that
+        may no longer exist.
+        """
+        document = fsa.Document(automaton, fsa.Layout.auto(automaton),
+                                self.editor.document.next_id)
+        self._stop_execution()
+        self.editor.apply(document, action=action)
+        self._after_edit()
+        self._fit_to_content()
+
+    def _minimize_automaton(self) -> None:
+        """Merge the states no word can tell apart."""
+        automaton = self.editor.automaton
+        if automaton.initial is None:
+            self._show_message("Minimise needs an initial state")
+            return
+
+        reduced = fsa.minimize(automaton)
+        if len(reduced.states) == len(automaton.states):
+            self._show_message(f"Already minimal at {len(reduced.states)} states")
+            return
+
+        before = len(automaton.states)
+        self._replace_automaton(reduced, "minimise")
+        self._show_message(
+            f"Minimised {before} states to {len(reduced.states)}")
+
+    def _trim_automaton(self) -> None:
+        """Drop the states that cannot appear on an accepting run."""
+        automaton = self.editor.automaton
+        trimmed = fsa.trim(automaton)
+        removed = len(automaton.states) - len(trimmed.states)
+        if not removed:
+            self._show_message("Nothing to trim")
+            return
+
+        self._replace_automaton(trimmed, "trim")
+        self._show_message(
+            f"Trimmed {removed} state{'s' if removed != 1 else ''}")
+
     def _focus_states(self, states: List[str]) -> None:
         """Glide the camera to the states a diagnostic names."""
         positions = [self.editor.position_of(s) for s in states
@@ -780,6 +829,9 @@ class AutomatonSimulator:
     def _show_general_context_menu(self, pos: Tuple[int, int]) -> None:
         self.ui_manager.show_context_menu(pos, [
             MenuItem("Add state here", events.AddStateAt(self._world(pos))),
+            MenuItem(SEPARATOR),
+            MenuItem("Minimise", events.MinimizeAutomaton()),
+            MenuItem("Trim", events.TrimAutomaton()),
             MenuItem(SEPARATOR),
             MenuItem("Fit to content", events.FitView()),
         ])
