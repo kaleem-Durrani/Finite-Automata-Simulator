@@ -24,6 +24,7 @@ from fsa import serialize
 from main import AutomatonSimulator
 from rendering.renderer import default_state_radius
 from rendering.scene import NodeKind
+from ui import events
 
 
 @pytest.fixture
@@ -128,7 +129,7 @@ def test_context_menu_delete_clears_selection(app):
     """Right-click Delete used to leave the selection dangling, so the next Q
     or W raised KeyError on a state that no longer existed."""
     app.editor.select("q1")
-    app._handle_context_menu_action("delete_state:q1")
+    app._process_ui_events([events.DeleteState("q1")])
 
     assert "q1" not in app.editor.automaton.states
     assert app.editor.selection is None
@@ -404,7 +405,7 @@ def test_quit_with_unsaved_changes_asks_first(app):
     assert app.running is True
     assert app.ui_manager.confirm_intent == "quit_after_confirm"
 
-    app._process_ui_actions({"confirmed": "quit_after_confirm"})
+    app._process_ui_events([events.Confirmed("quit_after_confirm")])
     assert app.running is False
 
 
@@ -425,7 +426,8 @@ def test_load_with_unsaved_changes_asks_first(app):
 
 
 def test_typing_in_a_dialog_does_not_edit_the_automaton(app):
-    """Editor shortcuts are bare letters and used to fire behind open dialogs."""
+    """Keys used to fire editor shortcuts behind an open dialog. Bare letters
+    now only pick a symbol, but the capture rule still has to hold."""
     app.ui_manager.adding_symbol = True
     before = app.editor.document
     app.editor.select("q0")
@@ -953,43 +955,45 @@ def test_losing_the_last_accepting_state_is_visible(app):
 
 def test_context_menu_reports_every_action(app):
     """Each item used to change something silently, or nothing at all."""
-    app._handle_context_menu_action("toggle_accept:q0")
+    app._process_ui_events([events.ToggleAccept("q0")])
     assert "now accepting" in app.message_text
     assert "q0" in app.editor.automaton.accept
 
-    app._handle_context_menu_action("toggle_accept:q0")
+    app._process_ui_events([events.ToggleAccept("q0")])
     assert "no longer accepting" in app.message_text
 
-    app._handle_context_menu_action("set_initial:q2")
+    app._process_ui_events([events.SetInitial("q2")])
     assert "initial state" in app.message_text
     assert app.editor.automaton.initial == "q2"
 
-    app._handle_context_menu_action("make_trap:q2")
+    app._process_ui_events([events.MakeTrap("q2")])
     assert "loops on" in app.message_text
 
 
 def test_state_menu_shows_what_the_state_already_is(app):
     app._show_state_context_menu((300, 300), "q1")
-    items = {item[0]: item for item in app.ui_manager.context_menu.items}
-    assert items["Accepting"][2] is True
-    assert items["Initial state"][2] is False
+    items = {item.label: item for item in app.ui_manager.context_menu.items}
+    assert items["Accepting"].checked is True
+    assert items["Initial state"].checked is False
 
     app.ui_manager.hide_context_menu()
     app._show_state_context_menu((300, 300), "q0")
-    items = {item[0]: item for item in app.ui_manager.context_menu.items}
-    assert items["Accepting"][2] is False
-    assert items["Initial state"][2] is True
+    items = {item.label: item for item in app.ui_manager.context_menu.items}
+    assert items["Accepting"].checked is False
+    assert items["Initial state"].checked is True
 
 
 def test_menu_items_without_a_toggle_still_work(app):
+    """A plain command carries no `checked`, so nothing draws a radio dot."""
     app._show_general_context_menu((300, 300))
     for item in app.ui_manager.context_menu.items:
-        assert len(item) in (2, 3)
+        assert item.checked is None
+        assert item.is_separator or item.event is not None
     pump(app)
 
 
 def test_add_state_here_places_it_under_the_cursor(app):
-    app._handle_context_menu_action("add_state:400.0,250.0")
+    app._process_ui_events([events.AddStateAt((400.0, 250.0))])
     assert app.editor.selection is not None
     position = app.editor.position_of(app.editor.selection)
     assert position == pytest.approx((400.0, 250.0))
@@ -1283,13 +1287,13 @@ def test_right_click_on_an_edge_offers_its_symbols(app):
 
     menu = app.ui_manager.context_menu
     assert menu is not None
-    labels = [item[0] for item in menu.items]
+    labels = [item.label for item in menu.items]
     assert any(label.startswith("Remove '") for label in labels)
 
 
 def test_removing_a_symbol_from_an_edge(app):
     assert app.editor.automaton.target("q0", "b") == "q1"
-    app._handle_context_menu_action("unedge:bq0")
+    app._process_ui_events([events.RemoveTransition("q0", "b")])
 
     assert app.editor.automaton.target("q0", "b") is None
     assert "Removed q0 --b--> q1" in app.message_text
@@ -1302,13 +1306,13 @@ def test_straighten_clears_the_arc(app):
     app.editor.add_transition("q0", "a", "q2", arc=40.0)
     assert app.editor.layout.arc_of("q0", "q2") == 40.0
 
-    app._handle_context_menu_action("straighten:2:q0q2")
+    app._process_ui_events([events.StraightenEdge("q0", "q2")])
     assert app.editor.layout.arc_of("q0", "q2") == 0.0
 
 
 def test_rename_flow_end_to_end(app):
     """Menu, prompt, typing, enter -- and the canvas shows the label."""
-    app._handle_context_menu_action("rename_prompt:q1")
+    app._process_ui_events([events.RenamePrompt("q1")])
     assert app.ui_manager.file_prompt_mode == "rename"
     assert app.ui_manager.rename_target == "q1"
 
@@ -1329,7 +1333,7 @@ def test_the_prompt_opens_prefilled_with_the_current_label(app):
     small edit. Enter without touching the field therefore keeps the label --
     clearing it is what resets, and that is a separate deliberate act."""
     app.editor.rename("q1", "even")
-    app._handle_context_menu_action("rename_prompt:q1")
+    app._process_ui_events([events.RenamePrompt("q1")])
     assert app.ui_manager.file_prompt_text == "even"
 
     press(app, pygame.K_RETURN, "\r")
@@ -1338,7 +1342,7 @@ def test_the_prompt_opens_prefilled_with_the_current_label(app):
 
 def test_clearing_the_rename_field_resets_the_label(app):
     app.editor.rename("q1", "even")
-    app._handle_context_menu_action("rename_prompt:q1")
+    app._process_ui_events([events.RenamePrompt("q1")])
     while app.ui_manager.file_prompt_text:
         press(app, pygame.K_BACKSPACE)
 
@@ -1349,7 +1353,7 @@ def test_clearing_the_rename_field_resets_the_label(app):
 def test_an_unlabelled_state_opens_an_empty_prompt(app):
     """No label means nothing to edit -- the field starts empty rather than
     pre-filled with the id, so typing does not have to clear it first."""
-    app._handle_context_menu_action("rename_prompt:q1")
+    app._process_ui_events([events.RenamePrompt("q1")])
     assert app.ui_manager.file_prompt_text == ""
 
 
@@ -1385,7 +1389,7 @@ def test_clearing_a_label_leaves_no_trace(app):
     a change with nothing to show for it."""
     assert dict(app.editor.automaton.labels) == {}
 
-    app._handle_context_menu_action("rename_prompt:q1")
+    app._process_ui_events([events.RenamePrompt("q1")])
     press(app, pygame.K_RETURN, "\r")
 
     assert dict(app.editor.automaton.labels) == {}
@@ -1394,7 +1398,7 @@ def test_clearing_a_label_leaves_no_trace(app):
 
 
 def test_naming_a_state_its_own_id_is_not_an_edit(app):
-    app._handle_context_menu_action("rename_prompt:q1")
+    app._process_ui_events([events.RenamePrompt("q1")])
     for char in "q1":
         press(app, ord(char), char)
     press(app, pygame.K_RETURN, "\r")
@@ -1440,7 +1444,8 @@ def test_a_context_menu_is_nudged_back_onto_the_screen(app):
     past the window edge is not merely invisible -- no mouse position can ever
     reach it, and there is no keyboard fallback."""
     ui = app.ui_manager
-    items = [(f"Item {i}", f"noop:{i}") for i in range(12)]
+    items = [ui_manager_module.MenuItem(f"Item {i}", events.FocusStates((str(i),)))
+             for i in range(12)]
     ui.show_context_menu((ui.screen_width - 4, ui.screen_height - 10), items)
 
     rect = ui._context_menu_rect()
@@ -1448,9 +1453,9 @@ def test_a_context_menu_is_nudged_back_onto_the_screen(app):
     assert rect.right <= ui.screen_width and rect.bottom <= ui.screen_height
 
     height = ui_manager_module.CONTEXT_MENU_ITEM_HEIGHT
-    for i, (_, action) in enumerate(items):
+    for i, item in enumerate(items):
         centre = (rect.x + 5, rect.y + i * height + height // 2)
-        assert ui._handle_context_menu_click(centre) == action
+        assert ui._handle_context_menu_click(centre) == item.event
 
 
 def test_the_state_menu_keeps_delete_reachable_low_on_the_canvas(app):
@@ -1465,7 +1470,7 @@ def test_the_state_menu_keeps_delete_reachable_low_on_the_canvas(app):
     height = ui_manager_module.CONTEXT_MENU_ITEM_HEIGHT
     last = len(ui.context_menu.items) - 1
     centre = (rect.x + 5, rect.y + last * height + height // 2)
-    assert ui._handle_context_menu_click(centre) == "delete_state:q1"
+    assert ui._handle_context_menu_click(centre) == events.DeleteState("q1")
 
 
 def test_straighten_is_not_offered_on_a_self_loop(app):
@@ -1474,7 +1479,7 @@ def test_straighten_is_not_offered_on_a_self_loop(app):
     app.editor.add_transition("q0", "a", "q0", arc=40.0)
     app._show_edge_context_menu((400, 300), ("q0", "q0"))
 
-    labels = [item[0] for item in app.ui_manager.context_menu.items]
+    labels = [item.label for item in app.ui_manager.context_menu.items]
     assert "Straighten" not in labels
     assert any(label.startswith("Remove '") for label in labels)
 
@@ -1485,7 +1490,7 @@ def test_straighten_on_a_two_way_pair_reports_what_it_did(app):
     app.editor.add_transition("q0", "a", "q2", arc=40.0)
     app.editor.add_transition("q2", "a", "q0")
 
-    app._handle_context_menu_action("straighten:2:q0q2")
+    app._process_ui_events([events.StraightenEdge("q0", "q2")])
     assert app.editor.layout.arc_of("q0", "q2") == 0.0
     assert "Manual bend cleared" in app.message_text
 
@@ -1513,9 +1518,9 @@ def test_a_state_id_containing_the_separator_straightens_the_right_edge(app):
     }), None)
 
     app._show_edge_context_menu((400, 300), ("a>b", "c"))
-    straighten = next(item[1] for item in app.ui_manager.context_menu.items
-                      if item[0] == "Straighten")
-    app._handle_context_menu_action(straighten)
+    straighten = next(item.event for item in app.ui_manager.context_menu.items
+                      if item.label == "Straighten")
+    app._process_ui_events([straighten])
 
     assert app.editor.layout.arc_of("a>b", "c") == 0.0
     # Splitting on the first '>' would have named ("a", "b>c") -- a real edge,
@@ -1525,7 +1530,7 @@ def test_a_state_id_containing_the_separator_straightens_the_right_edge(app):
 
 def test_the_rename_field_stops_at_the_limit(app):
     """A label has a circle to fit in; a path does not."""
-    app._handle_context_menu_action("rename_prompt:q1")
+    app._process_ui_events([events.RenamePrompt("q1")])
     for _ in range(ui_manager_module.RENAME_LABEL_LIMIT + 30):
         press(app, ord("x"), "x")
 
@@ -1803,8 +1808,8 @@ def test_the_confirm_dialog_can_be_answered_with_the_mouse(app):
     assert manager.confirm_intent is None
 
     manager.show_confirm("Discard unsaved changes?", "load_after_confirm")
-    assert manager._handle_modal_click(confirm.center) == {
-        'confirmed': 'load_after_confirm'}
+    assert manager._handle_modal_click(confirm.center) == [
+        events.Confirmed('load_after_confirm')]
 
 
 def test_the_confirm_button_names_the_action(app):
@@ -1883,5 +1888,76 @@ def test_a_long_label_is_elided_when_the_node_is_drawn(app, monkeypatch):
 
 def test_set_initial_ignores_unknown_states(app):
     before = app.editor.automaton.initial
-    app._handle_context_menu_action("set_initial:nope")
+    app._process_ui_events([events.SetInitial("nope")])
     assert app.editor.automaton.initial == before
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: typed events and shortcuts that do not shadow the alphabet
+# ---------------------------------------------------------------------------
+
+
+def test_an_automaton_over_qwr_can_be_built_by_typing(app):
+    """Phase 7 exit criterion. While `q`, `w` and `r` were bare shortcuts an
+    alphabet containing them could be drawn with the mouse but never typed at:
+    pressing `q` toggled accepting instead of choosing the symbol `q`."""
+    for symbol in "qwr":
+        app.editor.add_symbol(symbol)
+    app.ui_manager.sync_symbols_with(app.editor.automaton)
+    settled = app.editor.document
+
+    for symbol in "qwr":
+        press(app, ord(symbol), symbol)
+        assert app.ui_manager.selected_symbol == symbol
+    assert app.editor.document == settled, "choosing a symbol edits nothing"
+
+    click(app, screen_of(app, "q0"), shift=True)
+    click(app, screen_of(app, "q2"))
+    assert app.editor.automaton.target("q0", "r") == "q2"
+
+
+def test_editing_shortcuts_are_chords(app):
+    app.editor.select("q0")
+    before = "q0" in app.editor.automaton.accept
+    chord(app, pygame.K_a, pygame.KMOD_CTRL)
+    assert ("q0" in app.editor.automaton.accept) != before
+
+    chord(app, pygame.K_t, pygame.KMOD_CTRL)
+    assert app.editor.automaton.target("q0", "a") == "q0"
+
+
+def test_arrow_keys_step_the_run(app):
+    app._test_string("ab")
+    press(app, pygame.K_RIGHT)
+    assert app.execution_step == 1
+    press(app, pygame.K_LEFT)
+    assert app.execution_step == 0
+
+
+def test_an_event_with_no_handler_is_a_crash_not_a_shrug(app):
+    """Twelve of the twenty-nine action names in the previous scheme had no
+    handler and did nothing, silently, because a dict lookup that misses is
+    not an error."""
+    class Unhandled(events.UiEvent):
+        pass
+
+    with pytest.raises(events.UnknownEventError):
+        app._process_ui_events([Unhandled()])
+
+
+def test_every_emitted_event_has_a_handler(app):
+    """The whole vocabulary, not just the ones a test happens to exercise."""
+    handled = set(app._event_handlers)
+    emitted = {value for name, value in vars(events).items()
+               if isinstance(value, type) and issubclass(value, events.UiEvent)
+               and value is not events.UiEvent}
+    assert emitted <= handled, sorted(e.__name__ for e in emitted - handled)
+
+
+def test_menu_items_carry_events_not_packed_strings(app):
+    """An id is a field, not a substring, so no separator can occur inside one
+    and address the wrong thing."""
+    app._show_state_context_menu((300, 300), "q1")
+    for item in app.ui_manager.context_menu.items:
+        if not item.is_separator:
+            assert isinstance(item.event, events.UiEvent)

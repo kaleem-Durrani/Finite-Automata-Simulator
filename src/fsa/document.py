@@ -155,10 +155,6 @@ class Document:
     def add_symbol(self, symbol: Symbol) -> "Document":
         return Document(self.automaton.with_symbol(symbol), self.layout, self.next_id)
 
-    def remove_symbol(self, symbol: Symbol) -> "Document":
-        return Document(self.automaton.without_symbol(symbol), self.layout,
-                        self.next_id)
-
     # ------------------------------------------------------------------
     # Wholesale replacement
     # ------------------------------------------------------------------

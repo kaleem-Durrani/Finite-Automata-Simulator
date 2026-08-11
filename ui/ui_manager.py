@@ -15,6 +15,8 @@ from rendering import primitives
 from rendering.animation import Animated, Timer, ease_out
 from rendering.fonts import FontBook
 from rendering.theme import Theme
+from ui import events
+from ui.events import UiEvent
 from ui.layout_spec import (
     HELP_LINE_HEIGHT,
     HELP_TITLE_HEIGHT,
@@ -56,10 +58,15 @@ HELP_LINES = [
     "- Space: Tap to add a state,",
     "  hold to pan the view",
     "- Delete: Remove selected state",
-    "- Q: Toggle accepting",
-    "- W: Make a trap (loop all",
+    "- Ctrl+A: Toggle accepting",
+    "- Ctrl+T: Make a trap (loop all",
     "  symbols back to itself)",
-    "- R: Fit view to automaton",
+    "- Ctrl+0: Fit view to automaton",
+    "",
+    "Every plain key picks a symbol,",
+    "so an alphabet may contain any",
+    "letter without a shortcut",
+    "stealing it.",
     "",
     "Creating Transitions:",
     "- Pick a symbol from the",
@@ -83,8 +90,8 @@ HELP_LINES = [
     "- Click Test or press Enter",
     "",
     "Execution Visualization:",
-    "- N: Next step",
-    "- P: Previous step",
+    "- Right arrow: Next step",
+    "- Left arrow: Previous step",
     "- TAB: Toggle animation",
     "- ESC: Stop visualization",
     "",
@@ -98,6 +105,13 @@ HELP_LINES = [
 #: What each right-hand panel is called. A collapsed panel shows only this, so
 #: it doubles as the notch's label: folding a panel away must not cost the user
 #: the knowledge of what is inside it.
+#: What every handler in this module returns: the events the application must
+#: act on, and nothing about how the interface looks.
+Events = List[UiEvent]
+
+#: A menu row that is a rule rather than a command.
+SEPARATOR = "---"
+
 #: Dialog sizes, tall enough for a row of buttons above the footer hint.
 CONFIRM_DIALOG_SIZE = (420, 172)
 FILE_PROMPT_SIZE = (440, 200)
@@ -123,16 +137,31 @@ RENAME_LABEL_LIMIT = 24
 
 
 @dataclass
-class ContextMenu:
-    """A context menu: a position and a list of items.
+class MenuItem:
+    """One row of a context menu.
 
-    An item is ``(label, action)``, or ``(label, action, checked)`` for a
-    toggle. Carrying the current value means the menu can show what a state
-    already is, rather than making the user pick something and look to find
-    out whether it changed anything.
+    ``event`` is the thing to do, as a value -- not a string with the state id
+    packed into it. That packing is what let ``straighten:a>b>c`` split at the
+    wrong ``>`` and flatten somebody else's edge.
+
+    ``checked`` carries the current value for a toggle, so the menu can show
+    what a state already is rather than making the user pick something and
+    then look to see whether it changed anything.
     """
+    label: str
+    event: Optional[UiEvent] = None
+    checked: Optional[bool] = None
+
+    @property
+    def is_separator(self) -> bool:
+        return self.label == SEPARATOR
+
+
+@dataclass
+class ContextMenu:
+    """A context menu: a position and a list of items."""
     position: Tuple[int, int]
-    items: List[Tuple[Any, ...]]
+    items: List[MenuItem]
     visible: bool = True
     selected_index: int = -1
 
@@ -164,7 +193,6 @@ class UIManager:
 
         # UI state management
         self.show_help = False
-        self.show_tutorial = False
         self.input_text = ""
         self.input_active = False
         self.test_result = ""
@@ -464,7 +492,7 @@ class UIManager:
         self.screen_height = height
         self._setup_ui_elements()
     
-    def handle_event(self, event: pygame.event.Event) -> Tuple[Dict[str, Any], bool]:
+    def handle_event(self, event: pygame.event.Event) -> Tuple[Events, bool]:
         """
         Handle a UI event.
 
@@ -472,7 +500,7 @@ class UIManager:
             event: Pygame event to process
 
         Returns:
-            (actions, consumed). `consumed` is True when this event belonged to
+            (events, consumed). `consumed` is True when this event belonged to
             the UI and must not also be interpreted as a click on the canvas.
             The application layer runs its own handlers only when it is False,
             which is what stops one click from doing two contradictory things.
@@ -498,7 +526,7 @@ class UIManager:
         if event.type == pygame.MOUSEWHEEL:
             return self._handle_mouse_wheel(event)
 
-        return {}, False
+        return [], False
 
     # ------------------------------------------------------------------
     # Hit testing
@@ -660,114 +688,120 @@ class UIManager:
 
     # -- widget handlers ------------------------------------------------
 
-    def _on_help_button(self, _pos) -> Dict[str, Any]:
+    # Handlers return the events the application must act on. Anything that
+    # only changes how the interface looks -- focus, folding, the help panel --
+    # is done here and announced to nobody, because nobody was listening.
+
+    def _on_help_button(self, _pos) -> Events:
         self.show_help = not self.show_help
         self.help_scroll_offset = 0
-        return {'toggle_help': True}
+        return []
 
-    def _on_pan_button(self, _pos) -> Dict[str, Any]:
+    def _on_pan_button(self, _pos) -> Events:
         self.select_tool("pan")
-        return {'tool_selected': self.tool}
+        return [events.ToolSelected(self.tool)]
 
-    def _on_transition_button(self, _pos) -> Dict[str, Any]:
+    def _on_transition_button(self, _pos) -> Events:
         self.select_tool("transition")
-        return {'tool_selected': self.tool}
+        return [events.ToolSelected(self.tool)]
 
-    def _on_step_next(self, _pos) -> Dict[str, Any]:
-        return {'step_next': True}
+    def _on_step_next(self, _pos) -> Events:
+        return [events.StepForward()]
 
-    def _on_step_previous(self, _pos) -> Dict[str, Any]:
-        return {'step_previous': True}
+    def _on_step_previous(self, _pos) -> Events:
+        return [events.StepBack()]
 
-    def _on_play_pause(self, _pos) -> Dict[str, Any]:
-        return {'toggle_animation': True}
+    def _on_play_pause(self, _pos) -> Events:
+        return [events.ToggleAnimation()]
 
-    def _on_stop_run(self, _pos) -> Dict[str, Any]:
-        return {'stop_execution': True}
+    def _on_stop_run(self, _pos) -> Events:
+        return [events.StopExecution()]
 
-    def _on_confirm_yes(self, _pos) -> Dict[str, Any]:
+    def _on_confirm_yes(self, _pos) -> Events:
         intent = self.confirm_intent
         self.hide_confirm()
-        return {'confirmed': intent}
+        return [events.Confirmed(intent)] if intent else []
 
-    def _on_confirm_no(self, _pos) -> Dict[str, Any]:
+    def _on_confirm_no(self, _pos) -> Events:
         self.hide_confirm()
-        return {'confirm_cancel': True}
+        return []
 
-    def _on_input_collapse(self, _pos) -> Dict[str, Any]:
+    def _on_input_collapse(self, _pos) -> Events:
         self.input_expanded = False
         self.input_active = False
-        return {'input_collapsed': True}
+        return []
 
-    def _on_input_expand(self, _pos) -> Dict[str, Any]:
+    def _on_input_expand(self, _pos) -> Events:
         self.input_expanded = True
         self.input_active = True
-        return {'input_expanded': True}
+        return []
 
     def _panel_header_handler(self, key: str):
-        def handler(_pos) -> Dict[str, Any]:
+        def handler(_pos) -> Events:
             self.toggle_panel(key)
-            return {'panel_toggled': key}
+            return []
         return handler
 
-    def _on_save_button(self, _pos) -> Dict[str, Any]:
-        return {'save_automaton': True}
+    def _on_save_button(self, _pos) -> Events:
+        return [events.SaveRequested()]
 
-    def _on_load_button(self, _pos) -> Dict[str, Any]:
-        return {'load_automaton': True}
+    def _on_load_button(self, _pos) -> Events:
+        return [events.LoadRequested()]
 
-    def _on_theme_button(self, _pos) -> Dict[str, Any]:
-        return {'toggle_theme': True}
+    def _on_theme_button(self, _pos) -> Events:
+        return [events.ToggleTheme()]
 
-    def _on_test_button(self, _pos) -> Dict[str, Any]:
-        return {'test_string': self.input_text}
+    def _on_test_button(self, _pos) -> Events:
+        return [events.TestString(self.input_text)]
 
-    def _on_input_field(self, _pos) -> Dict[str, Any]:
+    def _on_input_field(self, _pos) -> Events:
         self.input_active = True
-        return {'input_focus': True}
+        return []
 
-    def _on_add_symbol_button(self, _pos) -> Dict[str, Any]:
+    def _on_add_symbol_button(self, _pos) -> Events:
         self.adding_symbol = True
         self.new_symbol_input = ""
-        return {'add_symbol': True}
+        return []
 
-    def _on_fix_button(self, _pos) -> Dict[str, Any]:
-        return {'complete_automaton': True}
+    def _on_fix_button(self, _pos) -> Events:
+        return [events.CompleteAutomaton()]
 
-    def _diagnostic_handler(self, payload: Dict[str, Any]):
-        def handler(_pos) -> Dict[str, Any]:
-            return payload
+    def _diagnostic_handler(self, states: Tuple[str, ...]):
+        def handler(_pos) -> Events:
+            return [events.FocusStates(states)]
         return handler
 
     def _symbol_handler(self, symbol: str):
-        def handler(_pos) -> Dict[str, Any]:
+        def handler(_pos) -> Events:
             self.selected_symbol = symbol
-            return {'symbol_selected': symbol,
-                    'show_message': f"Selected symbol: {symbol}"}
+            return [events.SymbolSelected(symbol)]
         return handler
 
-    def _on_speed_slider(self, pos) -> Dict[str, Any]:
+    def _on_speed_slider(self, pos) -> Events:
         self.speed_slider_dragging = True
-        return self._set_speed_from_x(pos[0])
+        self._set_speed_from_x(pos[0])
+        return []
 
-    def _set_speed_from_x(self, x: int) -> Dict[str, Any]:
-        """Map an x coordinate on the slider to an animation speed."""
+    def _set_speed_from_x(self, x: int) -> None:
+        """Map an x coordinate on the slider to an animation speed.
+
+        The speed lives on the manager and the application reads it there, so
+        moving the slider is not news anyone has to be told.
+        """
         slider = self.speed_slider_rect
         if slider is None:
-            return {}
+            return
         ratio = (x - slider.x) / slider.width
         ratio = max(0.0, min(1.0, ratio))
         self.animation_speed = int(
             SPEED_MIN_MS + ratio * (SPEED_MAX_MS - SPEED_MIN_MS))
-        return {'speed_changed': self.animation_speed}
 
     # ------------------------------------------------------------------
     # Mouse
     # ------------------------------------------------------------------
 
-    def _handle_mouse_down(self, event) -> Tuple[Dict[str, Any], bool]:
+    def _handle_mouse_down(self, event) -> Tuple[Events, bool]:
         """Route a mouse press to exactly one owner, topmost first."""
-        actions: Dict[str, Any] = {}
         # Hit-test against where the click happened, not where the cursor is
         # now. Those differ whenever the mouse moves between the event being
         # queued and the queue being drained, which loses clicks and lets a
@@ -785,16 +819,14 @@ class UIManager:
         # The context menu is above every other widget, and any click while it
         # is open belongs to it -- either choosing an item or dismissing it.
         if self.context_menu and self.context_menu.visible:
-            menu_action = self._handle_context_menu_click(pos)
-            self.context_menu = None
-            if menu_action:
-                actions['context_menu_action'] = menu_action
-            return actions, True
+            chosen = self._handle_context_menu_click(pos)
+            self.hide_context_menu()
+            return ([chosen] if chosen is not None else []), True
 
         if event.button != 1:
             # Right and middle clicks belong to the canvas unless they land on
             # a panel.
-            return actions, self.is_over_ui(pos)
+            return [], self.is_over_ui(pos)
 
         for rect, handler in self._widget_hits():
             if rect.collidepoint(pos):
@@ -810,23 +842,24 @@ class UIManager:
         self.input_active = False
 
         # A click on a panel with no widget under it is still the UI's.
-        return actions, self.is_over_ui(pos)
+        return [], self.is_over_ui(pos)
 
-    def _handle_mouse_up(self, event) -> Tuple[Dict[str, Any], bool]:
+    def _handle_mouse_up(self, event) -> Tuple[Events, bool]:
         """Release the speed slider and the pressed-button visual."""
         self._pressed_rect = None
         if event.button == 1 and self.speed_slider_dragging:
             self.speed_slider_dragging = False
-            return {}, True
-        return {}, False
+            return [], True
+        return [], False
 
-    def _handle_mouse_motion(self, event) -> Tuple[Dict[str, Any], bool]:
+    def _handle_mouse_motion(self, event) -> Tuple[Events, bool]:
         """Drag the speed slider."""
         if self.speed_slider_dragging:
-            return self._set_speed_from_x(event.pos[0]), True
-        return {}, False
+            self._set_speed_from_x(event.pos[0])
+            return [], True
+        return [], False
 
-    def _handle_modal_click(self, pos) -> Dict[str, Any]:
+    def _handle_modal_click(self, pos) -> Events:
         """Route a click inside a modal dialog to its buttons.
 
         Every click used to be swallowed here, which meant the confirmation
@@ -840,7 +873,7 @@ class UIManager:
                 return self._on_confirm_yes(pos)
             if cancel.collidepoint(pos):
                 return self._on_confirm_no(pos)
-            return {}
+            return []
 
         if self.file_prompt_mode:
             cancel, confirm = self.layout.confirm_buttons(self._file_prompt_rect())
@@ -848,29 +881,30 @@ class UIManager:
                 return self._submit_file_prompt()
             if cancel.collidepoint(pos):
                 self.hide_file_prompt()
-                return {'file_prompt_cancel': True}
-        return {}
+        return []
 
-    def _handle_symbol_dialog_click(self, pos) -> Dict[str, Any]:
+    def _handle_symbol_dialog_click(self, pos) -> Events:
         """Handle the add-symbol dialog's own buttons."""
-        actions: Dict[str, Any] = {}
         cancel, add = self._symbol_dialog_buttons()
 
         if cancel.collidepoint(pos):
             self.adding_symbol = False
             self.new_symbol_input = ""
-            actions['symbol_dialog_cancel'] = True
         elif add.collidepoint(pos) and self.new_symbol_input:
-            actions['symbol_add'] = self.new_symbol_input
+            symbol = self.new_symbol_input
             self.adding_symbol = False
             self.new_symbol_input = ""
+            if self.can_add_symbol(symbol):
+                return [events.SymbolAdded(symbol)]
+            return [events.SymbolRejected(
+                "Not a symbol, or already in the alphabet")]
 
-        return actions
+        return []
 
-    def _handle_mouse_wheel(self, event) -> Tuple[Dict[str, Any], bool]:
+    def _handle_mouse_wheel(self, event) -> Tuple[Events, bool]:
         """Scroll the help panel. The canvas zooms only when this declines."""
         if not self.show_help:
-            return {}, False
+            return [], False
 
         # Scroll bounds come from the same constants the drawing code uses.
         # They used to be independent guesses that disagreed with the content,
@@ -880,7 +914,7 @@ class UIManager:
         max_scroll = max(0, len(HELP_LINES) - self.layout.help_visible_lines())
         self.help_scroll_offset -= event.y * 3
         self.help_scroll_offset = max(0, min(max_scroll, self.help_scroll_offset))
-        return {}, True
+        return [], True
     
     def is_keyboard_captured(self) -> bool:
         """
@@ -947,33 +981,29 @@ class UIManager:
             self.selected_symbol = self.available_symbols[0]
         self._recompute_symbol_buttons()
 
-    def _submit_file_prompt(self) -> Dict[str, Any]:
+    def _submit_file_prompt(self) -> Events:
         """Accept whatever the prompt currently holds.
 
         Shared by the Enter key and the confirm button, so the two cannot come
         to different conclusions about what the prompt meant.
         """
-        actions: Dict[str, Any] = {}
         mode = self.file_prompt_mode
         name = self.file_prompt_text.strip()
+        target = self.rename_target
         self.hide_file_prompt()
         if mode == 'rename':
             # An empty name is a deliberate reset to the state's own id, so it
             # is not a cancel.
-            actions['rename_state'] = (self.rename_target, name)
-        elif name:
-            actions['save_to_path' if mode == 'save' else 'load_to_path'] = name
-        else:
-            actions['file_prompt_cancel'] = True
-        return actions
+            return [events.RenameState(target, name)]
+        if not name:
+            return []
+        return [events.SaveToPath(name) if mode == 'save'
+                else events.LoadFromPath(name)]
 
-    def _handle_file_prompt_key(self, event) -> Dict[str, Any]:
+    def _handle_file_prompt_key(self, event) -> Events:
         """Handle keys while the filename prompt is open."""
-        actions: Dict[str, Any] = {}
-
         if event.key == pygame.K_ESCAPE:
             self.hide_file_prompt()
-            actions['file_prompt_cancel'] = True
         elif event.key == pygame.K_RETURN:
             return self._submit_file_prompt()
         elif event.key == pygame.K_BACKSPACE:
@@ -985,26 +1015,18 @@ class UIManager:
             if len(self.file_prompt_text) < limit:
                 self.file_prompt_text += event.unicode
 
-        return actions
+        return []
 
-    def _handle_confirm_key(self, event) -> Dict[str, Any]:
+    def _handle_confirm_key(self, event) -> Events:
         """Handle keys while the confirmation dialog is open."""
-        actions: Dict[str, Any] = {}
-
         if event.key in (pygame.K_y, pygame.K_RETURN):
-            intent = self.confirm_intent
-            self.hide_confirm()
-            actions['confirmed'] = intent
-        elif event.key in (pygame.K_n, pygame.K_ESCAPE):
-            self.hide_confirm()
-            actions['confirm_cancel'] = True
+            return self._on_confirm_yes(None)
+        if event.key in (pygame.K_n, pygame.K_ESCAPE):
+            return self._on_confirm_no(None)
+        return []
 
-        return actions
-
-    def _handle_key_down(self, event) -> Dict[str, Any]:
+    def _handle_key_down(self, event) -> Events:
         """Handle key down events."""
-        actions: Dict[str, Any] = {}
-
         # Dialogs are modal, and they are checked before anything else so that
         # keys reach the topmost one only.
         if self.confirm_intent:
@@ -1014,47 +1036,41 @@ class UIManager:
             return self._handle_file_prompt_key(event)
 
         if self.adding_symbol:
-            # Handle symbol addition dialog
             if event.key == pygame.K_ESCAPE:
                 self.adding_symbol = False
                 self.new_symbol_input = ""
             elif event.key == pygame.K_RETURN:
-                if self.new_symbol_input and self.can_add_symbol(self.new_symbol_input):
-                    actions['symbol_added'] = self.new_symbol_input
+                symbol = self.new_symbol_input
+                if symbol and self.can_add_symbol(symbol):
                     self.adding_symbol = False
                     self.new_symbol_input = ""
-                else:
-                    actions['symbol_add_error'] = "Not a symbol, or already in the alphabet"
+                    return [events.SymbolAdded(symbol)]
+                return [events.SymbolRejected(
+                    "Not a symbol, or already in the alphabet")]
             elif event.key == pygame.K_BACKSPACE:
                 if self.new_symbol_input:
                     self.new_symbol_input = self.new_symbol_input[:-1]
             elif event.unicode.isprintable() and len(event.unicode) == 1:
-                # Replace the input with the new character (only one character allowed)
+                # One character only, so a second keystroke replaces the first.
                 self.new_symbol_input = event.unicode
         elif self.input_active:
-            # Handle input field events
             if event.key == pygame.K_BACKSPACE:
                 if self.input_text:
                     self.input_text = self.input_text[:-1]
                 self.backspace_timer = pygame.time.get_ticks()
-                actions['backspace_start'] = True
             elif event.key == pygame.K_RETURN:
-                actions['test_string'] = self.input_text
+                return [events.TestString(self.input_text)]
             elif event.unicode.isprintable() and len(self.input_text) < 50:
-                # Only allow characters that make sense for automaton input
+                # Only characters that could plausibly be in an alphabet.
                 if event.unicode.isalnum() or event.unicode in '+-*/.()[]{}|&!~^':
                     self.input_text += event.unicode
 
-        return actions
-    
-    def _handle_key_up(self, event) -> Dict[str, Any]:
-        """Handle key up events."""
-        actions: Dict[str, Any] = {}
-        
-        if event.key == pygame.K_BACKSPACE:
-            actions['backspace_stop'] = True
-            
-        return actions
+        return []
+
+    def _handle_key_up(self, event) -> Events:
+        """Key releases change nothing the application needs to hear about."""
+        del event
+        return []
     
     def update(self, dt: float):
         """
@@ -1958,19 +1974,18 @@ class UIManager:
         # Menu items
         mouse_pos = pygame.mouse.get_pos()
         for i, item in enumerate(self.context_menu.items):
-            label, _action = item[0], item[1]
-            checked = item[2] if len(item) > 2 else None
+            label, checked = item.label, item.checked
             item_y = menu_y + i * item_height
             item_rect = pygame.Rect(menu_x, item_y, menu_width, item_height)
 
             # Highlight hovered item
-            if item_rect.collidepoint(mouse_pos) and label != "---":
+            if item_rect.collidepoint(mouse_pos) and not item.is_separator:
                 primitives.panel(self.screen, item_rect.inflate(-6, -2),
                                  palette.control_hover, radius=self.theme.radius.sm)
                 self.context_menu.selected_index = i
 
             # Separator line
-            if label == "---":
+            if item.is_separator:
                 line_y = item_y + item_height // 2
                 pygame.draw.line(self.screen, palette.border,
                                (menu_x + 10, line_y), (menu_x + menu_width - 10, line_y))
@@ -1990,26 +2005,24 @@ class UIManager:
                     else:
                         primitives.ring(self.screen, centre, 5, 1, palette.border_strong)
 
-    def _handle_context_menu_click(self, mouse_pos: Tuple[int, int]) -> Optional[str]:
-        """Handle clicks on context menu items."""
+    def _handle_context_menu_click(self, mouse_pos: Tuple[int, int]) -> Optional[UiEvent]:
+        """The event for the item under the pointer, if any."""
         if not self.context_menu:
             return None
 
         menu_x, menu_y = self.context_menu.position
 
-        for i, item in enumerate(self.context_menu.items):
-            label, action = item[0], item[1]
-            item_y = menu_y + i * CONTEXT_MENU_ITEM_HEIGHT
+        for index, item in enumerate(self.context_menu.items):
+            item_y = menu_y + index * CONTEXT_MENU_ITEM_HEIGHT
             item_rect = pygame.Rect(menu_x, item_y, CONTEXT_MENU_WIDTH,
                                     CONTEXT_MENU_ITEM_HEIGHT)
-
-            if item_rect.collidepoint(mouse_pos) and label != "---":
-                return action
+            if item_rect.collidepoint(mouse_pos) and not item.is_separator:
+                return item.event
 
         return None
 
     def show_context_menu(self, position: Tuple[int, int],
-                          items: List[Tuple[Any, ...]]):
+                          items: List[MenuItem]):
         """
         Show a context menu at the specified position, nudged to fit on screen.
 
@@ -2162,7 +2175,7 @@ class UIManager:
 
         self._draw_playback_controls()
 
-        hint = "N next   P back   Tab play   Esc stop"
+        hint = "← → step   Tab play   Esc stop"
         self.screen.blit(
             self.fonts.ui("small").render(hint, True, palette.text_faint),
             (x, body.y + RUN_HINT_TOP))

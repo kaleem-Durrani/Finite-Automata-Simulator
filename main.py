@@ -9,7 +9,7 @@ its own -- that is all in :mod:`fsa` -- and no drawing logic -- that is all in
 
 import os
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pygame
 
@@ -45,7 +45,8 @@ from rendering.scene import (
     TokenVisual,
 )
 from rendering.theme import Theme
-from ui.ui_manager import UIManager
+from ui import events
+from ui.ui_manager import SEPARATOR, MenuItem, UIManager
 
 #: Symbols a brand-new document starts with, so the palette is never empty.
 STARTING_ALPHABET = ("a", "b")
@@ -170,6 +171,7 @@ class AutomatonSimulator:
         self._right_dragged = False
 
         self._loop_angle_cache: Dict[str, float] = {}
+        self._event_handlers = self._build_event_handlers()
 
         self.ui_manager.sync_symbols_with(self.editor.automaton)
         self._update_caption()
@@ -206,8 +208,8 @@ class AutomatonSimulator:
                 self._handle_resize(event.w, event.h)
                 continue
 
-            actions, consumed = self.ui_manager.handle_event(event)
-            self._process_ui_actions(actions)
+            ui_events, consumed = self.ui_manager.handle_event(event)
+            self._process_ui_events(ui_events)
             if consumed:
                 continue
 
@@ -390,20 +392,15 @@ class AutomatonSimulator:
         """
         source, target = edge
         symbols = sorted(self.editor.automaton.grouped_transitions().get(edge, ()))
-        items: List[Tuple[Any, ...]] = []
-        for symbol in symbols:
-            # The symbol is one character, so it travels first in the payload
-            # and the rest is unambiguously the state id.
-            items.append((f"Remove '{symbol}'", f"unedge:{symbol}{source}"))
+        items = [MenuItem(f"Remove '{symbol}'",
+                          events.RemoveTransition(source, symbol))
+                 for symbol in symbols]
         # A self-loop stores an arc that no renderer honours, so offering to
         # straighten one promises a change nothing can show.
         if source != target and self.editor.layout.arc_of(source, target):
-            items.append(("---", ""))
-            # The id's length travels with the payload. State ids are opaque,
-            # so any character picked as a separator can occur inside one, and
-            # splitting on it would quietly straighten a different edge.
-            items.append(("Straighten",
-                          f"straighten:{len(source)}:{source}{target}"))
+            items.append(MenuItem(SEPARATOR))
+            items.append(MenuItem("Straighten",
+                                  events.StraightenEdge(source, target)))
         if items:
             self.ui_manager.show_context_menu(pos, items)
 
@@ -428,7 +425,7 @@ class AutomatonSimulator:
     def _handle_key_down(self, event: pygame.event.Event) -> None:
         """Handle key down events the UI did not consume."""
         # Chords first: a plain 'z' must not undo, and Ctrl+Z must not fall
-        # through to any letter shortcut.
+        # through to a symbol selection.
         if event.mod & pygame.KMOD_CTRL:
             if event.key == pygame.K_z and (event.mod & pygame.KMOD_SHIFT):
                 self._redo()
@@ -436,6 +433,12 @@ class AutomatonSimulator:
                 self._undo()
             elif event.key == pygame.K_y:
                 self._redo()
+            elif event.key == pygame.K_a:
+                self._toggle_accept_state()
+            elif event.key == pygame.K_t:
+                self._make_trap(self.editor.selection)
+            elif event.key == pygame.K_0:
+                self._fit_to_content()
             return
 
         if event.key == pygame.K_SPACE:
@@ -446,15 +449,9 @@ class AutomatonSimulator:
             self._space_held = True
         elif event.key == pygame.K_DELETE:
             self._delete_selected_state()
-        elif event.key == pygame.K_q:
-            self._toggle_accept_state()
-        elif event.key == pygame.K_w:
-            self._make_trap(self.editor.selection)
-        elif event.key == pygame.K_r:
-            self._fit_to_content()
-        elif event.key == pygame.K_n:
+        elif event.key == pygame.K_RIGHT:
             self._next_execution_step()
-        elif event.key == pygame.K_p:
+        elif event.key == pygame.K_LEFT:
             self._previous_execution_step()
         elif event.key == pygame.K_ESCAPE:
             if self.editor.pending_source is not None:
@@ -465,6 +462,11 @@ class AutomatonSimulator:
         elif event.key == pygame.K_TAB and self.execution_active:
             self._toggle_animation()
         elif event.unicode and event.unicode in self.editor.automaton.alphabet:
+            # Every editing shortcut above is a chord or a non-letter key, so a
+            # bare printable key means exactly one thing: pick that symbol.
+            # While `q`, `w`, `r`, `n` and `p` were shortcuts, an automaton over
+            # an alphabet containing them could be built with the mouse but
+            # never typed at -- pressing `q` toggled accepting instead.
             self.ui_manager.selected_symbol = event.unicode
             self._show_message(f"Symbol '{event.unicode}' selected")
 
@@ -472,55 +474,116 @@ class AutomatonSimulator:
     # UI actions
     # ------------------------------------------------------------------
 
-    def _process_ui_actions(self, actions: Dict[str, Any]) -> None:
-        for action, value in actions.items():
-            if action == 'test_string':
-                self._test_string(value)
-            elif action == 'step_next':
-                self._next_execution_step()
-            elif action == 'step_previous':
-                self._previous_execution_step()
-            elif action == 'toggle_animation':
-                self._toggle_animation()
-            elif action == 'stop_execution':
-                self._stop_execution()
-            elif action == 'tool_selected':
-                # Choosing a tool abandons a half-drawn transition: the arrow
-                # was following a pointer that is now doing something else.
-                self.editor.cancel_transition()
-                self._show_message(TOOL_HINTS.get(value, ""))
-            elif action == 'save_automaton':
-                self._save_automaton()
-            elif action == 'load_automaton':
-                self._load_automaton()
-            elif action == 'show_message':
-                self._show_message(value)
-            elif action == 'context_menu_action':
-                self._handle_context_menu_action(value)
-            elif action == 'save_to_path':
-                self._save_to_path(value)
-            elif action == 'load_to_path':
-                self._load_from_path(value)
-            elif action in ('file_prompt_cancel', 'confirm_cancel'):
-                self._show_message("Cancelled")
-            elif action == 'confirmed':
-                self._handle_confirmed(value)
-            elif action == 'toggle_theme':
-                self._toggle_theme()
-            elif action == 'complete_automaton':
-                self._complete_automaton()
-            elif action == 'focus_states':
-                self._focus_states(value)
-            elif action == 'rename_state':
-                self._rename_state(*value)
-            elif action == 'symbol_add':
-                self._add_symbol(value)
-            elif action == 'symbol_added':
-                self._add_symbol(value)
-            elif action == 'symbol_add_error':
-                self._show_message(f"Error: {value}")
-            elif action == 'symbol_dialog_cancel':
-                self._show_message("Cancelled")
+    def _build_event_handlers(self) -> Dict[type, Callable[[Any], None]]:
+        """One handler per event type.
+
+        A table rather than an if-chain, so an event with no handler is a
+        `KeyError` from :func:`events.dispatch` at the first press of the
+        button that emits it. Under the previous scheme it was a dict lookup
+        that missed, which is not an error -- twelve of the twenty-nine action
+        names in use had no handler and did nothing, silently.
+        """
+        return {
+            events.TestString: lambda e: self._test_string(e.text),
+            events.StepForward: lambda _e: self._next_execution_step(),
+            events.StepBack: lambda _e: self._previous_execution_step(),
+            events.ToggleAnimation: lambda _e: self._toggle_animation(),
+            events.StopExecution: lambda _e: self._stop_execution(),
+            events.ToolSelected: self._on_tool_selected,
+            events.SaveRequested: lambda _e: self._save_automaton(),
+            events.LoadRequested: lambda _e: self._load_automaton(),
+            events.SaveToPath: lambda e: self._save_to_path(e.path),
+            events.LoadFromPath: lambda e: self._load_from_path(e.path),
+            events.Confirmed: lambda e: self._handle_confirmed(e.intent),
+            events.PromptCancelled: lambda _e: self._show_message("Cancelled"),
+            events.ToggleTheme: lambda _e: self._toggle_theme(),
+            events.CompleteAutomaton: lambda _e: self._complete_automaton(),
+            events.FocusStates: lambda e: self._focus_states(list(e.states)),
+            events.ShowMessage: lambda e: self._show_message(e.text),
+            events.SymbolSelected: self._on_symbol_selected,
+            events.SymbolAdded: lambda e: self._add_symbol(e.symbol),
+            events.SymbolRejected: lambda e: self._show_message(f"Error: {e.reason}"),
+            events.RenameState: lambda e: self._rename_state(e.state, e.label),
+            events.RenamePrompt: self._on_rename_prompt,
+            events.AddStateAt: self._on_add_state_at,
+            events.DeleteState: self._on_delete_state,
+            events.ToggleAccept: self._on_toggle_accept,
+            events.SetInitial: self._on_set_initial,
+            events.MakeTrap: lambda e: self._make_trap(e.state),
+            events.RemoveTransition: self._on_remove_transition,
+            events.StraightenEdge: self._on_straighten_edge,
+            events.FitView: lambda _e: self._fit_to_content(),
+        }
+
+    def _process_ui_events(self, ui_events: Sequence[events.UiEvent]) -> None:
+        events.dispatch(ui_events, self._event_handlers)
+
+    # -- event handlers -------------------------------------------------
+
+    def _on_tool_selected(self, event: events.ToolSelected) -> None:
+        # Choosing a tool abandons a half-drawn transition: the arrow was
+        # following a pointer that is now doing something else.
+        self.editor.cancel_transition()
+        self._show_message(TOOL_HINTS.get(event.tool, ""))
+
+    def _on_symbol_selected(self, event: events.SymbolSelected) -> None:
+        self._show_message(f"Selected symbol: {event.symbol}")
+
+    def _on_rename_prompt(self, event: events.RenamePrompt) -> None:
+        if event.state in self.editor.automaton.states:
+            self.ui_manager.show_rename_prompt(
+                event.state, self.editor.automaton.label_of(event.state))
+
+    def _on_add_state_at(self, event: events.AddStateAt) -> None:
+        # The user picked this spot, so honour it unless it would overlap.
+        state = self.editor.add_state(event.position,
+                                      minimum_gap=fsa.document.OVERLAP_GAP)
+        self.editor.select(state)
+        self._after_edit()
+        self._show_message(f"Added {state}")
+
+    def _on_delete_state(self, event: events.DeleteState) -> None:
+        if self.editor.remove_state(event.state):
+            self._after_edit()
+            self._show_message(f"Deleted {event.state}")
+
+    def _on_toggle_accept(self, event: events.ToggleAccept) -> None:
+        if event.state not in self.editor.automaton.states:
+            return
+        accepting = self.editor.toggle_accept(event.state)
+        self._after_edit()
+        self._show_message(
+            f"{event.state} is "
+            f"{'now accepting' if accepting else 'no longer accepting'}")
+
+    def _on_set_initial(self, event: events.SetInitial) -> None:
+        if event.state is not None and event.state not in self.editor.automaton.states:
+            return
+        self.editor.set_initial(event.state)
+        self._after_edit()
+        self._show_message(f"{event.state} is now the initial state")
+
+    def _on_remove_transition(self, event: events.RemoveTransition) -> None:
+        target = self.editor.automaton.target(event.source, event.symbol)
+        self.editor.remove_transition(event.source, event.symbol)
+        self._after_edit()
+        self._show_message(
+            f"Removed {event.source} --{event.symbol}--> {target}")
+
+    def _on_straighten_edge(self, event: events.StraightenEdge) -> None:
+        source, target = event.source, event.target
+        document = fsa.Document(
+            self.editor.document.automaton,
+            self.editor.document.layout.with_arc(source, target, 0.0),
+            self.editor.document.next_id)
+        self.editor.apply(document, action=f"straighten {source}->{target}")
+        self._after_edit()
+        # A two-way pair keeps an automatic bow so the two arrows stay apart.
+        # Reporting "straightened" there would describe a line the user can
+        # plainly see is still curved.
+        twinned = (target, source) in self.editor.automaton.grouped_transitions()
+        self._show_message("Manual bend cleared" if twinned
+                           else "Edge straightened")
 
     def _handle_confirmed(self, intent: str) -> None:
         if intent == 'quit_after_confirm':
@@ -702,81 +765,24 @@ class AutomatonSimulator:
         # already is instead of making the user guess and check.
         automaton = self.editor.automaton
         self.ui_manager.show_context_menu(pos, [
-            ("Accepting", f"toggle_accept:{state}", state in automaton.accept),
-            ("Initial state", f"set_initial:{state}", state == automaton.initial),
-            ("---", ""),
-            ("Rename...", f"rename_prompt:{state}"),
-            ("Make a trap", f"make_trap:{state}"),
-            ("---", ""),
-            ("Delete state", f"delete_state:{state}"),
+            MenuItem("Accepting", events.ToggleAccept(state),
+                     checked=state in automaton.accept),
+            MenuItem("Initial state", events.SetInitial(state),
+                     checked=state == automaton.initial),
+            MenuItem(SEPARATOR),
+            MenuItem("Rename...", events.RenamePrompt(state)),
+            MenuItem("Make a trap", events.MakeTrap(state)),
+            MenuItem(SEPARATOR),
+            MenuItem("Delete state", events.DeleteState(state)),
         ])
 
     def _show_general_context_menu(self, pos: Tuple[int, int]) -> None:
-        world = self._world(pos)
         self.ui_manager.show_context_menu(pos, [
-            ("Add state here", f"add_state:{world[0]},{world[1]}"),
-            ("---", ""),
-            ("Fit to content", "fit_view"),
+            MenuItem("Add state here", events.AddStateAt(self._world(pos))),
+            MenuItem(SEPARATOR),
+            MenuItem("Fit to content", events.FitView()),
         ])
 
-    def _handle_context_menu_action(self, action: str) -> None:
-        # partition rather than split, so a state id containing a colon cannot
-        # truncate the payload.
-        verb, _, payload = action.partition(":")
-
-        if verb == "toggle_accept":
-            if payload in self.editor.automaton.states:
-                accepting = self.editor.toggle_accept(payload)
-                self._after_edit()
-                self._show_message(
-                    f"{payload} is "
-                    f"{'now accepting' if accepting else 'no longer accepting'}")
-        elif verb == "make_trap":
-            self._make_trap(payload)
-        elif verb == "set_initial":
-            if payload in self.editor.automaton.states:
-                self.editor.set_initial(payload)
-                self._after_edit()
-                self._show_message(f"{payload} is now the initial state")
-        elif verb == "delete_state":
-            if self.editor.remove_state(payload):
-                self._after_edit()
-                self._show_message(f"Deleted {payload}")
-        elif verb == "add_state":
-            # The user picked this spot, so honour it unless it would overlap.
-            x, _, y = payload.partition(",")
-            state = self.editor.add_state((float(x), float(y)),
-                                          minimum_gap=fsa.document.OVERLAP_GAP)
-            self.editor.select(state)
-            self._after_edit()
-            self._show_message(f"Added {state}")
-        elif verb == "rename_prompt":
-            if payload in self.editor.automaton.states:
-                self.ui_manager.show_rename_prompt(
-                    payload, self.editor.automaton.label_of(payload))
-        elif verb == "unedge":
-            symbol, source = payload[0], payload[1:]
-            target = self.editor.automaton.target(source, symbol)
-            self.editor.remove_transition(source, symbol)
-            self._after_edit()
-            self._show_message(f"Removed {source} --{symbol}--> {target}")
-        elif verb == "straighten":
-            count, _, rest = payload.partition(":")
-            source, target = rest[:int(count)], rest[int(count):]
-            document = fsa.Document(
-                self.editor.document.automaton,
-                self.editor.document.layout.with_arc(source, target, 0.0),
-                self.editor.document.next_id)
-            self.editor.apply(document, action=f"straighten {source}->{target}")
-            self._after_edit()
-            # A two-way pair keeps an automatic bow so the two arrows stay
-            # apart. Reporting "straightened" there would describe a line the
-            # user can plainly see is still curved.
-            twinned = (target, source) in self.editor.automaton.grouped_transitions()
-            self._show_message("Manual bend cleared" if twinned
-                               else "Edge straightened")
-        elif verb == "fit_view":
-            self._fit_to_content()
 
     # ------------------------------------------------------------------
     # Files

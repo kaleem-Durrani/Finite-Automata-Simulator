@@ -86,14 +86,17 @@ verdict.
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo the last edit (`Ctrl+Shift+Z` also redoes) |
 | `Space` | Tapped, add a new state at the centre; held, pan the view |
 | `Delete` | Remove the selected state |
-| `Q` | Toggle the selected state as accepting |
-| `W` | Make the selected state a trap (loop every symbol back to it) |
-| `R` | Fit the view to the automaton |
-| `N` / `P` | Next / previous step during execution |
+| `Ctrl+A` | Toggle the selected state as accepting |
+| `Ctrl+T` | Make the selected state a trap (loop every symbol back to it) |
+| `Ctrl+0` | Fit the view to the automaton |
+| `→` / `←` | Next / previous step during execution |
 | `Tab` | Toggle automatic playback during execution |
 | `Esc` | Stop the execution trace, or close a dialog |
 
-Typing a symbol that is in the palette selects it for the next transition.
+Typing a symbol that is in the palette selects it for the next transition. Every editing
+shortcut is a chord or a non-letter key precisely so that this is safe: while `Q`, `W`, `R`, `N`
+and `P` were bare shortcuts, an automaton over an alphabet containing them could be drawn with the
+mouse but never typed at — pressing `q` toggled accepting instead of choosing `q`.
 
 ### Context menu
 
@@ -117,7 +120,7 @@ is one, and vice versa.
 3. Switch on the arrow tool, click a state, then click the target.
 4. Right-click a state and choose Accepting.
 5. Type a string into the input field at the bottom and press `Enter`.
-6. Press `N` and `P` to step through the run.
+6. Press the arrow keys to step through the run.
 
 ## The bundled demo
 
