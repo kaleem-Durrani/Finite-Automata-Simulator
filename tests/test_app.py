@@ -26,6 +26,7 @@ from rendering.renderer import default_state_radius
 from rendering.scene import NodeKind
 from ui import context_menu, dialogs, events, layout_spec
 from ui.panels import column as column_module
+from ui.panels import diagnostics as diagnostics_panel
 
 
 @pytest.fixture
@@ -2127,3 +2128,45 @@ def test_trim_from_the_canvas_menu_drops_the_useless_states(app):
     assert "q3" not in after.states
     for word in ["", "a", "b", "ab", "ba", "aab"]:
         assert fsa.accepts(after, word) == fsa.accepts(before, word)
+
+
+def test_a_diagnostic_message_is_shown_in_full(app):
+    """The incomplete row's second sentence is the lesson -- that a missing
+    arrow rejects a string for a reason unrelated to the language. Truncating
+    it leaves a warning with the teaching removed."""
+    document = fsa.Document()
+    for symbol in "ab":
+        document = document.add_symbol(symbol)
+    document, _ = document.add_state((0.0, 0.0))
+    document, _ = document.add_state((200.0, 0.0))
+    automaton = (document.automaton.with_initial("q0").with_accept("q1")
+                 .with_transition("q0", "a", "q0")
+                 .with_transition("q0", "b", "q1")
+                 .with_transition("q1", "b", "q1"))
+    app.editor.replace(fsa.Document(automaton, fsa.Layout.auto(automaton), 2),
+                       None)
+    pump(app, frames=40)
+
+    defect = next(d for d in fsa.defects(automaton) if d.kind == "incomplete")
+    font = app.ui_manager.chrome.fonts.ui("tiny")
+    budget = diagnostics_panel._text_budget(
+        layout_spec.PANEL_WIDTH - 12, defect)
+    lines = diagnostics_panel.wrap(font, defect.message, budget)
+
+    assert " ".join(lines) == defect.message
+    assert not lines[-1].endswith("...")
+
+
+def test_the_diagnostics_panel_is_tall_enough_for_its_text(app):
+    """The height is measured with the same wrap the drawing uses, so the panel
+    cannot be laid out one size and painted another."""
+    pump(app, frames=40)
+    rect = next((r for key, r, _t in app.ui_manager._column
+                 if key == "diagnostics"), None)
+    if rect is None:
+        pytest.skip("the demo has no defects to show")
+
+    needed = diagnostics_panel.body_height(
+        app.ui_manager.chrome, app.ui_manager.diagnostics,
+        layout_spec.PANEL_WIDTH)
+    assert rect.height >= needed

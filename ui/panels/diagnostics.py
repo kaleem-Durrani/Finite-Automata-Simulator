@@ -34,6 +34,78 @@ class DiagnosticHits:
     fix_button: Optional[pygame.Rect] = None
 
 
+#: A row is at most this many lines. Rows are sized from the wrapped text, so
+#: a generous cap costs nothing when the message is short -- and the messages
+#: that need the room are the ones carrying the explanation.
+MAX_LINES = 6
+MAX_ROWS = 4
+LINE_HEIGHT = 14
+ROW_GAP = 6
+#: Padding above and below the text inside a row.
+ROW_PADDING = 8
+
+
+def _has_fix(defect: Defect) -> bool:
+    return bool(defect.kind == "incomplete")
+
+
+def _text_budget(row_width: int, defect: Defect) -> int:
+    """Width left for the message after the dot and any button."""
+    return row_width - 28 - (72 if _has_fix(defect) else 0)
+
+
+def row_height(lines: int) -> int:
+    """How tall a row with this many wrapped lines has to be."""
+    return max(1, lines) * LINE_HEIGHT + ROW_PADDING
+
+
+def wrap(font: pygame.font.Font, message: str, budget: int) -> List[str]:
+    """Break a defect message into lines that fit.
+
+    Wrapping rather than truncating, because the tail of these messages is the
+    part that names the states and symbols -- and, for the incomplete row, the
+    sentence explaining that a missing arrow rejects a string for a reason that
+    has nothing to do with the language. Cutting that off leaves a warning with
+    the lesson removed.
+    """
+    lines: List[str] = []
+    current = ""
+    for word in message.split():
+        trial = (current + " " + word).strip()
+        if font.size(trial)[0] <= budget or not current:
+            current = trial
+            continue
+        lines.append(current)
+        current = word
+        if len(lines) == MAX_LINES:
+            break
+    if current and len(lines) < MAX_LINES:
+        lines.append(current)
+
+    # Only the very last line may be elided, and only when the message is
+    # genuinely longer than the row can ever show.
+    if len(lines) == MAX_LINES and font.size(lines[-1])[0] > budget:
+        while lines[-1] and font.size(lines[-1] + "...")[0] > budget:
+            lines[-1] = lines[-1][:-2]
+        lines[-1] += "..."
+    return lines
+
+
+def body_height(chrome: Chrome, diagnostics: Sequence[Defect],
+                width: int) -> int:
+    """How tall the panel body must be to show these rows in full.
+
+    Measured with the same font and the same wrap the drawing uses, so the
+    panel cannot be laid out one size and painted another.
+    """
+    font = chrome.fonts.ui("tiny")
+    total = 6
+    for defect in diagnostics[:MAX_ROWS]:
+        lines = wrap(font, defect.message, _text_budget(width - 12, defect))
+        total += row_height(len(lines)) + ROW_GAP
+    return total
+
+
 def draw_diagnostics(chrome: Chrome, *,
                      rect: pygame.Rect,
                      diagnostics: Sequence[Defect],
@@ -79,54 +151,33 @@ def draw_diagnostics(chrome: Chrome, *,
 
     font = chrome.fonts.ui("tiny")
     row_y = body.y + 2
-    for defect in diagnostics[:4]:
-        if row_y + 36 > body.bottom:
+    for defect in diagnostics[:MAX_ROWS]:
+        text_lines = wrap(font, defect.message,
+                          _text_budget(body.width - 12, defect))
+        height = row_height(len(text_lines))
+        if row_y + height > body.bottom:
             break
-        row = pygame.Rect(body.x + 6, row_y, body.width - 12, 36)
+        row = pygame.Rect(body.x + 6, row_y, body.width - 12, height)
 
         colour = palette.error if defect.is_blocking else palette.warning
         if defect.kind == "unreachable_states":
             colour = palette.unreachable_ring
         primitives.filled_circle(screen, (row.x + 10, row.y + 10), 4, colour)
 
-        has_fix = defect.kind == "incomplete"
-        budget = row.width - 28 - (44 if has_fix else 0)
-
-        # Two wrapped lines rather than one truncated one: a single line
-        # always cut exactly the part that named the states and symbols,
-        # which is the panel's entire teaching content.
-        words = defect.message.split()
-        lines: List[str] = []
-        current = ""
-        for word in words:
-            trial = (current + " " + word).strip()
-            if font.size(trial)[0] <= budget or not current:
-                current = trial
-            else:
-                lines.append(current)
-                current = word
-                if len(lines) == 2:
-                    break
-        if current and len(lines) < 2:
-            lines.append(current)
-        if len(lines) == 2 and font.size(lines[1])[0] > budget:
-            while lines[1] and font.size(lines[1] + "...")[0] > budget:
-                lines[1] = lines[1][:-2]
-            lines[1] += "..."
-
-        for j, text in enumerate(lines):
+        for index, text in enumerate(text_lines):
             screen.blit(font.render(text, True, palette.text_muted),
-                        (row.x + 22, row.y + 3 + j * 14))
+                        (row.x + 22, row.y + 3 + index * LINE_HEIGHT))
 
-        if has_fix:
-            fix = pygame.Rect(row.right - 40, row.y + 6, 36, 24)
-            button(chrome, fix, "Fix", accent=True,
+        if _has_fix(defect):
+            fix = pygame.Rect(row.right - 68, row.y + 6, 64, 24)
+            button(chrome, fix, "Complete", accent=True,
                    hovered=fix.collidepoint(mouse_pos),
                    pressed=pressed_rect == fix)
             fix_button = fix
         elif defect.states:
             hit_rows.append((row, {"focus_states": list(defect.states)}))
 
-        row_y += 40
+        row_y += height + ROW_GAP
+
 
     return DiagnosticHits(rows=hit_rows, fix_button=fix_button)

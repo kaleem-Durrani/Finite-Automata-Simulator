@@ -753,9 +753,19 @@ class AutomatonSimulator:
             self._show_message("Nothing to trim")
             return
 
+        was_complete = fsa.is_complete(automaton)
         self._replace_automaton(trimmed, "trim")
-        self._show_message(
-            f"Trimmed {removed} state{'s' if removed != 1 else ''}")
+
+        count = f"Trimmed {removed} state{'s' if removed != 1 else ''}"
+        if was_complete and not fsa.is_complete(trimmed):
+            # Trim and complete are exact inverses on a machine that needed a
+            # trap: a trap is precisely a state no accepting run visits. Say so,
+            # or the incompleteness warning reappears with no visible cause and
+            # the two buttons look like they are fighting each other.
+            self._show_message(
+                f"{count}; delta is partial again -- a trap is a dead state")
+        else:
+            self._show_message(count)
 
     def _focus_states(self, states: List[str]) -> None:
         """Glide the camera to the states a diagnostic names."""

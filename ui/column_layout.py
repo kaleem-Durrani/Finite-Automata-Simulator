@@ -11,7 +11,7 @@ glide up into the gap a departing one releases instead of jumping.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Tuple
 
 import pygame
 
@@ -79,14 +79,9 @@ def status_body_height(*, warn_no_accepting: bool) -> int:
     return 4 * 19 + (18 if warn_no_accepting else 0) + 12
 
 
-def diagnostics_body_height(*, count: int) -> int:
-    """How tall the diagnostics body wants to be for its current rows."""
-    return min(count, 4) * 40 + 6
-
-
 def compute(state: ColumnState, *, layout: LayoutSpec, theme: Theme,
             execution_active: bool, legend_rows: int,
-            diagnostics: Sequence[object], warn_no_accepting: bool) -> Column:
+            diagnostics_height: int, warn_no_accepting: bool) -> Column:
     """Lay out the right-hand panels for this frame.
 
     Deterministic from current state -- panel heights depend only on content
@@ -107,8 +102,10 @@ def compute(state: ColumnState, *, layout: LayoutSpec, theme: Theme,
     wanted = [
         ("status", True, status_body_height(warn_no_accepting=warn_no_accepting)),
         ("run", execution_active, RUN_BODY_HEIGHT),
-        ("diagnostics", bool(diagnostics),
-         diagnostics_body_height(count=len(diagnostics))),
+        # The diagnostics panel measures its own wrapped text and passes the
+        # answer in, so the column cannot lay it out one size and the panel
+        # then paint another.
+        ("diagnostics", diagnostics_height > 6, diagnostics_height),
         ("legend", legend_rows >= 2, legend_rows * 22 + 6),
     ]
 

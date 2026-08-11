@@ -13,7 +13,7 @@ import fsa
 from rendering.animation import Animated, Timer, ease_out
 from rendering.fonts import FontBook
 from rendering.theme import Theme
-from ui import column_layout, context_menu, dialogs, events
+from ui import column_layout, context_menu, dialogs, events, layout_spec
 
 # The help text lives at module level so that the code which scrolls it and the
 # code which draws it agree on how many lines there are. They used to be two
@@ -909,10 +909,14 @@ class UIManager:
         legend_rows += 1 if self.legend_dead else 0
         legend_rows += 1 if self.legend_unreachable else 0
 
+        # The diagnostics panel measures its own wrapped text, so the
+        # column cannot lay it out one size and the panel paint another.
         self._column = column_layout.compute(
             self.column_state, layout=self.layout, theme=self.theme,
             execution_active=self.execution_panel_visible,
-            legend_rows=legend_rows, diagnostics=self.diagnostics,
+            legend_rows=legend_rows,
+            diagnostics_height=diagnostics.body_height(
+                self.chrome, self.diagnostics, layout_spec.PANEL_WIDTH),
             warn_no_accepting=self.warn_no_accepting)
         self._diagnostic_rows = []
         self._fix_button = None
