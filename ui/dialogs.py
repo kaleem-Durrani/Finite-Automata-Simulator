@@ -1,0 +1,245 @@
+"""The modal dialogs: the file prompt, the confirmation, and add-symbol.
+
+Every dialog is the same shape -- a dimmed screen, a centred raised box with a
+title, and a row of buttons above a footer hint -- so the frame is drawn once
+here and each dialog fills it in.
+
+The rect helpers are pure functions of the window size, deliberately. They are
+computed rather than recorded while drawing, so a dialog's buttons are live on
+the frame it opens rather than the frame after.
+"""
+
+from typing import Optional, Tuple
+
+import pygame
+
+from rendering import primitives
+from ui import widgets
+from ui.layout_spec import LayoutSpec
+from ui.widgets import Chrome
+
+#: Dialog sizes, tall enough for a row of buttons above the footer hint.
+CONFIRM_DIALOG_SIZE = (420, 172)
+FILE_PROMPT_SIZE = (440, 200)
+
+
+# ----------------------------------------------------------------------
+# Where a dialog sits
+# ----------------------------------------------------------------------
+
+def modal_rect(screen_width: int, screen_height: int,
+               width: int, height: int) -> pygame.Rect:
+    """Where a centred dialog of this size sits.
+
+    Computed rather than recorded while drawing, so a dialog's buttons are
+    live on the frame it opens rather than the frame after -- the same rule
+    the add-symbol dialog's buttons already followed.
+    """
+    return pygame.Rect(
+        (screen_width - width) // 2,
+        (screen_height - height) // 2,
+        width,
+        height,
+    )
+
+
+def confirm_rect(screen_width: int, screen_height: int) -> pygame.Rect:
+    return modal_rect(screen_width, screen_height, *CONFIRM_DIALOG_SIZE)
+
+
+def file_prompt_rect(screen_width: int, screen_height: int) -> pygame.Rect:
+    return modal_rect(screen_width, screen_height, *FILE_PROMPT_SIZE)
+
+
+def symbol_dialog_buttons(screen_width: int,
+                          screen_height: int) -> Tuple[pygame.Rect, pygame.Rect]:
+    """Cancel and Add rectangles for the add-symbol dialog.
+
+    Computed rather than recorded during drawing, so the buttons are live on
+    the frame the dialog opens instead of the frame after.
+    """
+    width, height = 300, 180
+    x = (screen_width - width) // 2
+    y = (screen_height - height) // 2
+    return (pygame.Rect(x + 50, y + 130, 80, 25),
+            pygame.Rect(x + 170, y + 130, 80, 25))
+
+
+# ----------------------------------------------------------------------
+# The shared frame
+# ----------------------------------------------------------------------
+
+def draw_modal_frame(chrome: Chrome, width: int, height: int, title: str, *,
+                     screen_width: int, screen_height: int) -> pygame.Rect:
+    """Dim the screen and draw an empty centred dialog box, returning it."""
+    palette = chrome.palette
+    primitives.dim(chrome.screen, (0, 0, 0, 150 if palette.is_dark else 90))
+
+    rect = modal_rect(screen_width, screen_height, width, height)
+    primitives.elevated_panel(chrome.screen, rect, palette.panel_raised,
+                              radius=chrome.radius.lg,
+                              border=palette.border_strong,
+                              shadow=palette.shadow, lift=7,
+                              bevel_light=palette.bevel_light,
+                              bevel_dark=palette.bevel_dark)
+
+    title_surface = chrome.fonts.ui("heading").render(title, True, palette.text)
+    chrome.screen.blit(title_surface, title_surface.get_rect(
+        centerx=rect.centerx, y=rect.y + chrome.space.lg))
+
+    return rect
+
+
+def _button(chrome: Chrome, rect: pygame.Rect, label: str, *,
+            pressed_rect: Optional[pygame.Rect], mouse_pos, accent: bool = False):
+    """One dialog button, hovered and pressed against the manager's state."""
+    widgets.button(chrome, rect, label, accent=accent,
+                   hovered=rect.collidepoint(mouse_pos),
+                   pressed=pressed_rect == rect)
+
+
+# ----------------------------------------------------------------------
+# The dialogs
+# ----------------------------------------------------------------------
+
+def draw_file_prompt(chrome: Chrome, *, layout: LayoutSpec,
+                     screen_width: int, screen_height: int,
+                     file_prompt_mode: Optional[str], file_prompt_text: str,
+                     rename_target: str = "",
+                     pressed_rect: Optional[pygame.Rect] = None,
+                     mouse_pos: Optional[Tuple[int, int]] = None) -> None:
+    """Draw the filename prompt (or its rename variant)."""
+    titles = {"save": "Save as", "load": "Load file",
+              "rename": f"Rename {rename_target}"}
+    rect = draw_modal_frame(chrome, 440, 160, titles.get(file_prompt_mode or '', ""),
+                            screen_width=screen_width,
+                            screen_height=screen_height)
+
+    palette = chrome.palette
+    if file_prompt_mode == "rename":
+        hint_text = "A display label. Leave empty to use the state's id."
+    else:
+        hint_text = "Relative to the project folder. '.json' is added if omitted."
+    hint = chrome.fonts.ui("small").render(hint_text, True, palette.text_muted)
+    chrome.screen.blit(hint, (rect.x + chrome.space.lg, rect.y + 50))
+
+    field = pygame.Rect(rect.x + chrome.space.lg, rect.y + 74,
+                        rect.width - chrome.space.lg * 2, 34)
+    primitives.panel(chrome.screen, field, palette.field,
+                     radius=chrome.radius.md, border=palette.accent,
+                     border_width=2)
+
+    # Show the tail of the text so the caret stays visible on long paths.
+    shown = file_prompt_text[-40:]
+    text_surface = chrome.fonts.mono("input").render(shown, True, palette.text)
+    text_rect = text_surface.get_rect(midleft=(field.left + 6, field.centery))
+    chrome.screen.blit(text_surface, text_rect)
+
+    if pygame.time.get_ticks() % 1100 < 560:
+        caret_x = min(text_rect.right + 2, field.right - 5)
+        pygame.draw.line(chrome.screen, palette.accent,
+                         (caret_x, field.top + 7), (caret_x, field.bottom - 7), 2)
+
+    verbs = {"save": "Save", "load": "Load", "rename": "Rename"}
+    cancel, confirm = layout.confirm_buttons(rect)
+    if mouse_pos is None:
+        mouse_pos = pygame.mouse.get_pos()
+    _button(chrome, cancel, "Cancel", pressed_rect=pressed_rect,
+            mouse_pos=mouse_pos)
+    _button(chrome, confirm, verbs.get(file_prompt_mode or '', "OK"), accent=True,
+            pressed_rect=pressed_rect, mouse_pos=mouse_pos)
+
+    footer = chrome.fonts.ui("small").render("Enter to confirm, Escape to cancel",
+                                             True, palette.text_faint)
+    chrome.screen.blit(footer, footer.get_rect(x=rect.x + chrome.space.lg,
+                                               centery=cancel.centery))
+
+
+def draw_confirm_dialog(chrome: Chrome, *, layout: LayoutSpec,
+                        screen_width: int, screen_height: int,
+                        confirm_intent: Optional[str], confirm_message: str,
+                        pressed_rect: Optional[pygame.Rect] = None,
+                        mouse_pos: Optional[Tuple[int, int]] = None) -> None:
+    """Draw the yes/no confirmation dialog."""
+    rect = draw_modal_frame(chrome, *CONFIRM_DIALOG_SIZE,
+                            title="Unsaved changes",
+                            screen_width=screen_width,
+                            screen_height=screen_height)
+
+    palette = chrome.palette
+    message = chrome.fonts.ui("body").render(confirm_message, True,
+                                             palette.text_muted)
+    chrome.screen.blit(message, message.get_rect(centerx=rect.centerx,
+                                                 y=rect.y + 56))
+
+    # The verb, not "Yes": a button that names what it will do is one the
+    # user can answer without re-reading the question above it.
+    verbs = {"quit_after_confirm": "Quit",
+             "load_after_confirm": "Discard",
+             "new_after_confirm": "Discard"}
+    cancel, confirm = layout.confirm_buttons(rect)
+    if mouse_pos is None:
+        mouse_pos = pygame.mouse.get_pos()
+    _button(chrome, cancel, "Cancel", pressed_rect=pressed_rect,
+            mouse_pos=mouse_pos)
+    _button(chrome, confirm, verbs.get(confirm_intent or "", "Confirm"),
+            accent=True, pressed_rect=pressed_rect, mouse_pos=mouse_pos)
+
+    footer = chrome.fonts.ui("small").render(
+        "Y confirms, N cancels", True, palette.text_faint)
+    chrome.screen.blit(footer, footer.get_rect(x=rect.x + chrome.space.lg,
+                                               centery=cancel.centery))
+
+
+def draw_add_symbol_dialog(chrome: Chrome, *,
+                           screen_width: int, screen_height: int,
+                           new_symbol_input: str,
+                           pressed_rect: Optional[pygame.Rect] = None,
+                           mouse_pos: Optional[Tuple[int, int]] = None) -> None:
+    """The add-symbol dialog, on the same modal frame as its siblings.
+
+    It predated the elevation pass and looked like a different application
+    next to the Save dialog: square corners, hard borders, flat buttons,
+    and no dimmed backdrop despite being modal to the keyboard.
+    """
+    palette = chrome.palette
+    rect = draw_modal_frame(chrome, 300, 180, "Add a symbol",
+                            screen_width=screen_width,
+                            screen_height=screen_height)
+
+    hint = chrome.fonts.ui("small").render(
+        "One printable character.", True, palette.text_muted)
+    chrome.screen.blit(hint, (rect.x + 20, rect.y + 48))
+
+    field = pygame.Rect(rect.x + 20, rect.y + 68, 260, 32)
+    primitives.sunken_well(chrome.screen, field, palette.field,
+                           radius=chrome.radius.md,
+                           border=palette.accent,
+                           well_shadow=palette.well_shadow)
+
+    if new_symbol_input:
+        glyph = chrome.fonts.mono("input").render(
+            new_symbol_input, True, palette.text)
+        chrome.screen.blit(glyph, glyph.get_rect(
+            midleft=(field.left + 8, field.centery)))
+        caret_x = field.left + 8 + glyph.get_width() + 2
+    else:
+        caret_x = field.left + 8
+
+    if pygame.time.get_ticks() % 1100 < 560:
+        pygame.draw.line(chrome.screen, palette.accent,
+                         (caret_x, field.top + 6),
+                         (caret_x, field.bottom - 6), 2)
+
+    cancel, add = symbol_dialog_buttons(screen_width, screen_height)
+    if mouse_pos is None:
+        mouse_pos = pygame.mouse.get_pos()
+    _button(chrome, cancel, "Cancel", pressed_rect=pressed_rect,
+            mouse_pos=mouse_pos)
+    _button(chrome, add, "Add", accent=True, pressed_rect=pressed_rect,
+            mouse_pos=mouse_pos)
+
+    footer = chrome.fonts.ui("small").render(
+        "Enter to add, Escape to cancel", True, palette.text_faint)
+    chrome.screen.blit(footer, footer.get_rect(
+        centerx=rect.centerx, y=rect.bottom - 24))

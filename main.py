@@ -46,7 +46,8 @@ from rendering.scene import (
 )
 from rendering.theme import Theme
 from ui import events
-from ui.ui_manager import SEPARATOR, MenuItem, UIManager
+from ui.context_menu import SEPARATOR, MenuItem
+from ui.ui_manager import UIManager
 
 #: Symbols a brand-new document starts with, so the palette is never empty.
 STARTING_ALPHABET = ("a", "b")

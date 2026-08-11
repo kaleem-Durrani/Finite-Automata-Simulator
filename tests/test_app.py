@@ -24,7 +24,8 @@ from fsa import serialize
 from main import AutomatonSimulator
 from rendering.renderer import default_state_radius
 from rendering.scene import NodeKind
-from ui import events
+from ui import context_menu, dialogs, events, layout_spec
+from ui.panels import column as column_module
 
 
 @pytest.fixture
@@ -1444,18 +1445,18 @@ def test_a_context_menu_is_nudged_back_onto_the_screen(app):
     past the window edge is not merely invisible -- no mouse position can ever
     reach it, and there is no keyboard fallback."""
     ui = app.ui_manager
-    items = [ui_manager_module.MenuItem(f"Item {i}", events.FocusStates((str(i),)))
+    items = [context_menu.MenuItem(f"Item {i}", events.FocusStates((str(i),)))
              for i in range(12)]
     ui.show_context_menu((ui.screen_width - 4, ui.screen_height - 10), items)
 
-    rect = ui._context_menu_rect()
+    rect = context_menu.bounds(menu=ui.context_menu)
     assert rect.left >= 0 and rect.top >= 0
     assert rect.right <= ui.screen_width and rect.bottom <= ui.screen_height
 
-    height = ui_manager_module.CONTEXT_MENU_ITEM_HEIGHT
+    height = context_menu.CONTEXT_MENU_ITEM_HEIGHT
     for i, item in enumerate(items):
         centre = (rect.x + 5, rect.y + i * height + height // 2)
-        assert ui._handle_context_menu_click(centre) == item.event
+        assert context_menu.event_at(menu=ui.context_menu, position=centre) == item.event
 
 
 def test_the_state_menu_keeps_delete_reachable_low_on_the_canvas(app):
@@ -1464,13 +1465,13 @@ def test_the_state_menu_keeps_delete_reachable_low_on_the_canvas(app):
     ui = app.ui_manager
     app._show_state_context_menu((300, ui.screen_height - 8), "q1")
 
-    rect = ui._context_menu_rect()
+    rect = context_menu.bounds(menu=ui.context_menu)
     assert rect.bottom <= ui.screen_height
 
-    height = ui_manager_module.CONTEXT_MENU_ITEM_HEIGHT
+    height = context_menu.CONTEXT_MENU_ITEM_HEIGHT
     last = len(ui.context_menu.items) - 1
     centre = (rect.x + 5, rect.y + last * height + height // 2)
-    assert ui._handle_context_menu_click(centre) == events.DeleteState("q1")
+    assert context_menu.event_at(menu=ui.context_menu, position=centre) == events.DeleteState("q1")
 
 
 def test_straighten_is_not_offered_on_a_self_loop(app):
@@ -1589,14 +1590,14 @@ def test_a_panel_header_folds_and_reopens_it(app):
 
     click(app, manager.layout.panel_header(status).center)
     pump(app, frames=40)
-    assert manager.collapsed["status"] is True
+    assert manager.column_state.collapsed["status"] is True
     folded = next(r for key, r, _t in manager._column if key == "status")
     assert folded.height < full_height
-    assert folded.height == ui_manager_module.PANEL_HEADER_HEIGHT
+    assert folded.height == layout_spec.PANEL_HEADER_HEIGHT
 
     click(app, manager.layout.panel_header(folded).center)
     pump(app, frames=40)
-    assert manager.collapsed["status"] is False
+    assert manager.column_state.collapsed["status"] is False
     assert next(r for key, r, _t in manager._column
                 if key == "status").height == full_height
 
@@ -1604,7 +1605,7 @@ def test_a_panel_header_folds_and_reopens_it(app):
 def test_a_collapsed_panel_still_says_what_it_is():
     """A notch nobody can read is just a missing panel."""
     for key in ("status", "diagnostics", "legend", "run"):
-        assert ui_manager_module.PANEL_TITLES[key].strip()
+        assert column_module.PANEL_TITLES[key].strip()
 
 
 def test_folding_a_panel_lifts_the_ones_below_it(app):
@@ -1612,7 +1613,7 @@ def test_folding_a_panel_lifts_the_ones_below_it(app):
     manager = app.ui_manager
     before = next(r for key, r, _t in manager._column if key == "legend").y
 
-    manager.toggle_panel("status")
+    manager.column_state.toggle("status")
     pump(app, frames=40)
     assert next(r for key, r, _t in manager._column if key == "legend").y < before
 
@@ -1802,7 +1803,8 @@ def test_the_confirm_dialog_can_be_answered_with_the_mouse(app):
     manager = app.ui_manager
     manager.show_confirm("Discard unsaved changes?", "load_after_confirm")
     pump(app, frames=2)
-    cancel, confirm = manager.layout.confirm_buttons(manager._confirm_rect())
+    box = dialogs.confirm_rect(manager.screen_width, manager.screen_height)
+    cancel, confirm = manager.layout.confirm_buttons(box)
 
     click(app, cancel.center)
     assert manager.confirm_intent is None
@@ -1825,7 +1827,8 @@ def test_the_save_prompt_can_be_confirmed_with_the_mouse(app, tmp_path):
     manager = app.ui_manager
     manager.show_file_prompt("save", "by_mouse.json")
     pump(app, frames=2)
-    _cancel, confirm = manager.layout.confirm_buttons(manager._file_prompt_rect())
+    prompt = dialogs.file_prompt_rect(manager.screen_width, manager.screen_height)
+    _cancel, confirm = manager.layout.confirm_buttons(prompt)
 
     click(app, confirm.center)
     assert manager.file_prompt_mode is None
@@ -1836,7 +1839,8 @@ def test_the_save_prompt_can_be_cancelled_with_the_mouse(app, tmp_path):
     manager = app.ui_manager
     manager.show_file_prompt("save", "never.json")
     pump(app, frames=2)
-    cancel, _confirm = manager.layout.confirm_buttons(manager._file_prompt_rect())
+    prompt = dialogs.file_prompt_rect(manager.screen_width, manager.screen_height)
+    cancel, _confirm = manager.layout.confirm_buttons(prompt)
 
     click(app, cancel.center)
     assert manager.file_prompt_mode is None
@@ -1850,7 +1854,8 @@ def test_the_prompt_button_and_the_enter_key_agree(app):
     manager.show_rename_prompt("q1", "q1")
     for char in "even":
         press(app, ord(char), char)
-    _cancel, confirm = manager.layout.confirm_buttons(manager._file_prompt_rect())
+    prompt = dialogs.file_prompt_rect(manager.screen_width, manager.screen_height)
+    _cancel, confirm = manager.layout.confirm_buttons(prompt)
 
     click(app, confirm.center)
     assert app.editor.automaton.label_of("q1") == "even"
@@ -1961,3 +1966,33 @@ def test_menu_items_carry_events_not_packed_strings(app):
     for item in app.ui_manager.context_menu.items:
         if not item.is_separator:
             assert isinstance(item.event, events.UiEvent)
+
+
+def test_the_add_symbol_dialog_button_works_on_frame_zero(app):
+    """Phase 7 exit criterion. Rects assigned as a side effect of drawing are
+    dead until something has been painted once, so the dialog's buttons used to
+    ignore the first click after it opened."""
+    click(app, app.ui_manager.add_symbol_button_rect.center)
+    assert app.ui_manager.adding_symbol, "the dialog is open"
+
+    # No pump(): nothing has drawn since it opened.
+    app.ui_manager.new_symbol_input = "c"
+    _cancel, add = dialogs.symbol_dialog_buttons(
+        app.ui_manager.screen_width, app.ui_manager.screen_height)
+    click(app, add.center)
+
+    assert "c" in app.editor.automaton.alphabet
+    assert not app.ui_manager.adding_symbol
+
+
+def test_thirty_edits_then_thirty_undos_is_the_original(app):
+    """Phase 7 exit criterion, at the application level: the property test in
+    test_undo.py covers the model, this covers the app driving it."""
+    before = app.editor.document
+    for _ in range(30):
+        press(app, pygame.K_SPACE, " ")
+    assert len(app.editor.automaton.states) == len(before.automaton.states) + 30
+
+    for _ in range(30):
+        chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    assert app.editor.document == before
