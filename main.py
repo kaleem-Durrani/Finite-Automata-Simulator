@@ -50,6 +50,14 @@ from ui.ui_manager import UIManager
 #: Symbols a brand-new document starts with, so the palette is never empty.
 STARTING_ALPHABET = ("a", "b")
 
+#: What each tool does, said once when it is chosen. A modal tool that changes
+#: what a click means owes the user an explanation of the change.
+TOOL_HINTS = {
+    "pointer": "Pointer: click to select, drag to move",
+    "pan": "Hand: drag anywhere to move the view",
+    "transition": "Transition: click a state, then its target",
+}
+
 
 def _maximize_window() -> None:
     """Open filling the screen.
@@ -341,11 +349,15 @@ class AutomatonSimulator:
             else:
                 self.editor.cancel_transition()
                 self._show_message("Transition cancelled")
-        elif shift and clicked:
+        elif (shift or self.ui_manager.transition_tool) and clicked:
+            # Shift is the shortcut; the transition tool is the discoverable
+            # way in. A hidden modifier was the only route to the single most
+            # common edit in the application.
             self.editor.select(clicked)
             self.editor.begin_transition(clicked)
             self._show_message(
-                f"Drawing '{self.ui_manager.selected_symbol}' from {clicked}")
+                f"Drawing '{self.ui_manager.selected_symbol}' from {clicked}"
+                " -- click its target")
         elif clicked:
             self.editor.select(clicked)
             self.editor.begin_drag(clicked, self._world(pos))
@@ -464,6 +476,19 @@ class AutomatonSimulator:
         for action, value in actions.items():
             if action == 'test_string':
                 self._test_string(value)
+            elif action == 'step_next':
+                self._next_execution_step()
+            elif action == 'step_previous':
+                self._previous_execution_step()
+            elif action == 'toggle_animation':
+                self._toggle_animation()
+            elif action == 'stop_execution':
+                self._stop_execution()
+            elif action == 'tool_selected':
+                # Choosing a tool abandons a half-drawn transition: the arrow
+                # was following a pointer that is now doing something else.
+                self.editor.cancel_transition()
+                self._show_message(TOOL_HINTS.get(value, ""))
             elif action == 'save_automaton':
                 self._save_automaton()
             elif action == 'load_automaton':

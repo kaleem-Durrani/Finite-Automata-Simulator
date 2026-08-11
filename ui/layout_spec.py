@@ -18,7 +18,7 @@ be computed from the window size alone.
 
 import math
 from dataclasses import dataclass
-from typing import Tuple
+from typing import List, Tuple
 
 import pygame
 
@@ -58,6 +58,21 @@ PANEL_GAP = 8
 #: notch that says what is inside without spending the space to show it.
 PANEL_HEADER_HEIGHT = 34
 
+# Transport buttons inside the run panel: back, play/pause, forward, stop.
+RUN_BUTTON_SIZE = (38, 28)
+RUN_BUTTON_GAP = 8
+#: Offsets down from the run panel's header. One stack, one direction.
+RUN_BUTTONS_TOP = 76
+RUN_SLIDER_TOP = 116
+RUN_HINT_TOP = 140
+#: Total body height the run panel needs for that stack.
+RUN_BODY_HEIGHT = 160
+
+#: Buttons on the modal dialogs. Every dialog offers its actions as buttons as
+#: well as keys -- a dialog whose only exit is a keystroke it mentions in small
+#: print at the bottom is a dialog most people are stuck in.
+DIALOG_BUTTON = (92, 30)
+
 # Speed slider, inside the run panel
 SLIDER_SIZE = (150, 16)
 SPEED_MIN_MS = 500
@@ -89,6 +104,7 @@ class LayoutSpec:
     height: int
 
     toolbar: pygame.Rect
+    transition_button: pygame.Rect
     pan_button: pygame.Rect
     theme_button: pygame.Rect
     load_button: pygame.Rect
@@ -112,6 +128,9 @@ class LayoutSpec:
         pan_button = pygame.Rect(
             theme_button.x - TOOLBAR_GROUP_GAP - TOOL_BUTTON_WIDTH,
             TOOLBAR_BUTTON_Y, TOOL_BUTTON_WIDTH, button_h)
+        transition_button = pygame.Rect(
+            pan_button.x - TOOLBAR_BUTTON_GAP - TOOL_BUTTON_WIDTH,
+            TOOLBAR_BUTTON_Y, TOOL_BUTTON_WIDTH, button_h)
 
         help_w, help_h = HELP_PANEL_SIZE
         help_panel = pygame.Rect(
@@ -129,6 +148,7 @@ class LayoutSpec:
             width=width,
             height=height,
             toolbar=pygame.Rect(0, 0, width, TOOLBAR_HEIGHT),
+            transition_button=transition_button,
             pan_button=pan_button,
             theme_button=theme_button,
             load_button=load_button,
@@ -228,13 +248,39 @@ class LayoutSpec:
         return max(1, content // HELP_LINE_HEIGHT)
 
     def speed_slider(self, panel: pygame.Rect) -> pygame.Rect:
-        """The playback-speed slider, inside whichever panel hosts it."""
-        return pygame.Rect(panel.x + 12, panel.bottom - 26,
+        """The playback-speed slider, inside whichever panel hosts it.
+
+        Measured down from the header rather than up from the bottom edge: the
+        run panel's contents are a single stack, and mixing the two directions
+        is how the keyboard hint and the playback row ended up drawn on top of
+        each other.
+        """
+        return pygame.Rect(panel.x + 12,
+                           panel.y + PANEL_HEADER_HEIGHT + RUN_SLIDER_TOP,
                            SLIDER_SIZE[0], SLIDER_SIZE[1])
 
     def panel_header(self, panel: pygame.Rect) -> pygame.Rect:
         """The always-drawn header strip that toggles a panel open and shut."""
         return pygame.Rect(panel.x, panel.y, panel.width, PANEL_HEADER_HEIGHT)
+
+    def run_buttons(self, panel: pygame.Rect) -> List[pygame.Rect]:
+        """Back, play/pause, forward and stop, inside the run panel.
+
+        Stepping through a run used to be keyboard-only, which meant the panel
+        described four commands it gave you no way to issue.
+        """
+        y = panel.y + PANEL_HEADER_HEIGHT + RUN_BUTTONS_TOP
+        x = panel.x + 12
+        w, h = RUN_BUTTON_SIZE
+        return [pygame.Rect(x + index * (w + RUN_BUTTON_GAP), y, w, h)
+                for index in range(4)]
+
+    def confirm_buttons(self, panel: pygame.Rect) -> Tuple[pygame.Rect, pygame.Rect]:
+        """Cancel and confirm, in that reading order."""
+        w, h = DIALOG_BUTTON
+        y = panel.bottom - h - 16
+        return (pygame.Rect(panel.right - 16 - w * 2 - 10, y, w, h),
+                pygame.Rect(panel.right - 16 - w, y, w, h))
 
 
 def chip_size() -> Tuple[int, int]:

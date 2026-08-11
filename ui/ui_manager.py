@@ -22,6 +22,8 @@ from ui.layout_spec import (
     PANEL_HEADER_HEIGHT,
     PANEL_MARGIN,
     PANEL_WIDTH,
+    RUN_BODY_HEIGHT,
+    RUN_HINT_TOP,
     SPEED_MAX_MS,
     SPEED_MIN_MS,
     LayoutSpec,
@@ -60,9 +62,13 @@ HELP_LINES = [
     "- R: Fit view to automaton",
     "",
     "Creating Transitions:",
-    "- Select symbol from toolbar",
-    "- Shift+click source state",
-    "- Click target state",
+    "- Pick a symbol from the",
+    "  palette, top left",
+    "- Switch on the arrow tool,",
+    "  click the source state,",
+    "  then click its target",
+    "- Or hold Shift and click the",
+    "  source, if you prefer keys",
     "",
     "Editing:",
     "- Right-click a state to",
@@ -92,6 +98,10 @@ HELP_LINES = [
 #: What each right-hand panel is called. A collapsed panel shows only this, so
 #: it doubles as the notch's label: folding a panel away must not cost the user
 #: the knowledge of what is inside it.
+#: Dialog sizes, tall enough for a row of buttons above the footer hint.
+CONFIRM_DIALOG_SIZE = (420, 172)
+FILE_PROMPT_SIZE = (440, 200)
+
 PANEL_TITLES = {
     "status": "Automaton",
     "run": "Run",
@@ -228,12 +238,12 @@ class UIManager:
         # and opens on a click or as soon as a run reports a verdict.
         self.input_expanded = False
 
-        # Hand tool: while it is on, dragging anywhere on the canvas pans.
-        # Holding space does the same without leaving the pointer tool, which
-        # is the shortcut every drawing program uses. The space half lives in
-        # the application, which owns canvas interaction; this is only the
-        # toolbar's toggle.
-        self.pan_tool = False
+        # The current tool: "pointer", "pan" or "transition". One name rather
+        # than a flag per tool, because the tools are exclusive and two
+        # booleans can both be true. Drawing a transition used to require
+        # holding shift -- a hidden modifier nothing on screen mentioned -- so
+        # it is a visible tool now, with shift kept as the shortcut.
+        self.tool = "pointer"
 
         # This frame's right-column rects, for hit-testing. Recomputed at the
         # top of draw(); events read the previous frame's values, which is
@@ -393,6 +403,26 @@ class UIManager:
         return self.layout.pan_button
 
     @property
+    def transition_button_rect(self) -> pygame.Rect:
+        return self.layout.transition_button
+
+    @property
+    def pan_tool(self) -> bool:
+        return self.tool == "pan"
+
+    @property
+    def transition_tool(self) -> bool:
+        return self.tool == "transition"
+
+    def select_tool(self, tool: str) -> None:
+        """Choose a tool, or click the active one again to put it back.
+
+        Exclusive by construction: there is one name, so turning a tool on
+        cannot leave another one also on.
+        """
+        self.tool = "pointer" if self.tool == tool else tool
+
+    @property
     def help_button_rect(self) -> pygame.Rect:
         return self.layout.help_button
 
@@ -528,7 +558,7 @@ class UIManager:
 
         wanted = [
             ("status", True, self._status_body_height()),
-            ("run", execution_active, 146),
+            ("run", execution_active, RUN_BODY_HEIGHT),
             ("diagnostics", bool(self.diagnostics), self._diagnostic_height()),
             ("legend", legend_rows >= 2, legend_rows * 22 + 6),
         ]
@@ -594,8 +624,15 @@ class UIManager:
             (self.layout.load_button, self._on_load_button),
             (self.layout.theme_button, self._on_theme_button),
             (self.layout.pan_button, self._on_pan_button),
+            (self.layout.transition_button, self._on_transition_button),
             (self.add_symbol_button_rect, self._on_add_symbol_button),
         ]
+        run_panel = next((r for key, r, t in self._column
+                          if key == "run" and t > 0.5), None)
+        if run_panel is not None and not self.collapsed.get("run"):
+            back, play, forward, stop = self.layout.run_buttons(run_panel)
+            hits += [(back, self._on_step_previous), (play, self._on_play_pause),
+                     (forward, self._on_step_next), (stop, self._on_stop_run)]
         if self.input_expanded:
             # The collapse chevron sits inside the panel, so it has to be
             # tested before the panel's own widgets.
@@ -629,8 +666,33 @@ class UIManager:
         return {'toggle_help': True}
 
     def _on_pan_button(self, _pos) -> Dict[str, Any]:
-        self.pan_tool = not self.pan_tool
-        return {'pan_tool': self.pan_tool}
+        self.select_tool("pan")
+        return {'tool_selected': self.tool}
+
+    def _on_transition_button(self, _pos) -> Dict[str, Any]:
+        self.select_tool("transition")
+        return {'tool_selected': self.tool}
+
+    def _on_step_next(self, _pos) -> Dict[str, Any]:
+        return {'step_next': True}
+
+    def _on_step_previous(self, _pos) -> Dict[str, Any]:
+        return {'step_previous': True}
+
+    def _on_play_pause(self, _pos) -> Dict[str, Any]:
+        return {'toggle_animation': True}
+
+    def _on_stop_run(self, _pos) -> Dict[str, Any]:
+        return {'stop_execution': True}
+
+    def _on_confirm_yes(self, _pos) -> Dict[str, Any]:
+        intent = self.confirm_intent
+        self.hide_confirm()
+        return {'confirmed': intent}
+
+    def _on_confirm_no(self, _pos) -> Dict[str, Any]:
+        self.hide_confirm()
+        return {'confirm_cancel': True}
 
     def _on_input_collapse(self, _pos) -> Dict[str, Any]:
         self.input_expanded = False
@@ -765,8 +827,28 @@ class UIManager:
         return {}, False
 
     def _handle_modal_click(self, pos) -> Dict[str, Any]:
-        """Clicks while a modal dialog is open are swallowed."""
-        del pos
+        """Route a click inside a modal dialog to its buttons.
+
+        Every click used to be swallowed here, which meant the confirmation
+        dialog and the file prompt could only be answered with the keyboard --
+        the buttons a mouse user goes looking for did not exist, and the keys
+        were named in small grey print along the bottom edge.
+        """
+        if self.confirm_intent:
+            cancel, confirm = self.layout.confirm_buttons(self._confirm_rect())
+            if confirm.collidepoint(pos):
+                return self._on_confirm_yes(pos)
+            if cancel.collidepoint(pos):
+                return self._on_confirm_no(pos)
+            return {}
+
+        if self.file_prompt_mode:
+            cancel, confirm = self.layout.confirm_buttons(self._file_prompt_rect())
+            if confirm.collidepoint(pos):
+                return self._submit_file_prompt()
+            if cancel.collidepoint(pos):
+                self.hide_file_prompt()
+                return {'file_prompt_cancel': True}
         return {}
 
     def _handle_symbol_dialog_click(self, pos) -> Dict[str, Any]:
@@ -865,6 +947,26 @@ class UIManager:
             self.selected_symbol = self.available_symbols[0]
         self._recompute_symbol_buttons()
 
+    def _submit_file_prompt(self) -> Dict[str, Any]:
+        """Accept whatever the prompt currently holds.
+
+        Shared by the Enter key and the confirm button, so the two cannot come
+        to different conclusions about what the prompt meant.
+        """
+        actions: Dict[str, Any] = {}
+        mode = self.file_prompt_mode
+        name = self.file_prompt_text.strip()
+        self.hide_file_prompt()
+        if mode == 'rename':
+            # An empty name is a deliberate reset to the state's own id, so it
+            # is not a cancel.
+            actions['rename_state'] = (self.rename_target, name)
+        elif name:
+            actions['save_to_path' if mode == 'save' else 'load_to_path'] = name
+        else:
+            actions['file_prompt_cancel'] = True
+        return actions
+
     def _handle_file_prompt_key(self, event) -> Dict[str, Any]:
         """Handle keys while the filename prompt is open."""
         actions: Dict[str, Any] = {}
@@ -873,17 +975,7 @@ class UIManager:
             self.hide_file_prompt()
             actions['file_prompt_cancel'] = True
         elif event.key == pygame.K_RETURN:
-            mode = self.file_prompt_mode
-            name = self.file_prompt_text.strip()
-            self.hide_file_prompt()
-            if mode == 'rename':
-                # An empty name is a deliberate reset to the state's own id,
-                # so it is not a cancel.
-                actions['rename_state'] = (self.rename_target, name)
-            elif name:
-                actions['save_to_path' if mode == 'save' else 'load_to_path'] = name
-            else:
-                actions['file_prompt_cancel'] = True
+            return self._submit_file_prompt()
         elif event.key == pygame.K_BACKSPACE:
             self.file_prompt_text = self.file_prompt_text[:-1]
         elif event.unicode.isprintable():
@@ -1049,17 +1141,32 @@ class UIManager:
         if self.confirm_intent:
             self._draw_confirm_dialog()
 
-    def _draw_modal_frame(self, width: int, height: int, title: str) -> pygame.Rect:
-        """Dim the screen and draw an empty centred dialog box, returning it."""
-        palette = self.theme.palette
-        primitives.dim(self.screen, (0, 0, 0, 150 if palette.is_dark else 90))
+    def _modal_rect(self, width: int, height: int) -> pygame.Rect:
+        """Where a centred dialog of this size sits.
 
-        rect = pygame.Rect(
+        Computed rather than recorded while drawing, so a dialog's buttons are
+        live on the frame it opens rather than the frame after -- the same rule
+        the add-symbol dialog's buttons already followed.
+        """
+        return pygame.Rect(
             (self.screen_width - width) // 2,
             (self.screen_height - height) // 2,
             width,
             height,
         )
+
+    def _confirm_rect(self) -> pygame.Rect:
+        return self._modal_rect(*CONFIRM_DIALOG_SIZE)
+
+    def _file_prompt_rect(self) -> pygame.Rect:
+        return self._modal_rect(*FILE_PROMPT_SIZE)
+
+    def _draw_modal_frame(self, width: int, height: int, title: str) -> pygame.Rect:
+        """Dim the screen and draw an empty centred dialog box, returning it."""
+        palette = self.theme.palette
+        primitives.dim(self.screen, (0, 0, 0, 150 if palette.is_dark else 90))
+
+        rect = self._modal_rect(width, height)
         primitives.elevated_panel(self.screen, rect, palette.panel_raised,
                                   radius=self.theme.radius.lg,
                                   border=palette.border_strong,
@@ -1105,24 +1212,44 @@ class UIManager:
             pygame.draw.line(self.screen, palette.accent,
                              (caret_x, field.top + 7), (caret_x, field.bottom - 7), 2)
 
+        verbs = {"save": "Save", "load": "Load", "rename": "Rename"}
+        cancel, confirm = self.layout.confirm_buttons(rect)
+        mouse_pos = pygame.mouse.get_pos()
+        self._button(cancel, "Cancel", hovered=cancel.collidepoint(mouse_pos))
+        self._button(confirm, verbs.get(self.file_prompt_mode, "OK"), accent=True,
+                     hovered=confirm.collidepoint(mouse_pos))
+
         footer = self.fonts.ui("small").render("Enter to confirm, Escape to cancel",
                                                True, palette.text_faint)
-        self.screen.blit(footer, footer.get_rect(centerx=rect.centerx,
-                                                 y=rect.bottom - 26))
+        self.screen.blit(footer, footer.get_rect(x=rect.x + self.theme.space.lg,
+                                                 centery=cancel.centery))
 
     def _draw_confirm_dialog(self):
         """Draw the yes/no confirmation dialog."""
-        rect = self._draw_modal_frame(420, 130, "Unsaved changes")
+        rect = self._draw_modal_frame(*CONFIRM_DIALOG_SIZE,
+                                      title="Unsaved changes")
 
         palette = self.theme.palette
         message = self.fonts.ui("body").render(self.confirm_message, True,
                                                palette.text_muted)
-        self.screen.blit(message, message.get_rect(centerx=rect.centerx, y=rect.y + 56))
+        self.screen.blit(message, message.get_rect(centerx=rect.centerx,
+                                                   y=rect.y + 56))
+
+        # The verb, not "Yes": a button that names what it will do is one the
+        # user can answer without re-reading the question above it.
+        verbs = {"quit_after_confirm": "Quit",
+                 "load_after_confirm": "Discard",
+                 "new_after_confirm": "Discard"}
+        cancel, confirm = self.layout.confirm_buttons(rect)
+        mouse_pos = pygame.mouse.get_pos()
+        self._button(cancel, "Cancel", hovered=cancel.collidepoint(mouse_pos))
+        self._button(confirm, verbs.get(self.confirm_intent or "", "Confirm"),
+                     accent=True, hovered=confirm.collidepoint(mouse_pos))
 
         footer = self.fonts.ui("small").render(
-            "Y or Enter to confirm, N or Escape to cancel", True, palette.text_faint)
-        self.screen.blit(footer, footer.get_rect(centerx=rect.centerx,
-                                                 y=rect.bottom - 30))
+            "Y confirms, N cancels", True, palette.text_faint)
+        self.screen.blit(footer, footer.get_rect(x=rect.x + self.theme.space.lg,
+                                                 centery=cancel.centery))
 
     def _draw_toolbar(self):
         """Draw the main toolbar at the top of the screen."""
@@ -1143,6 +1270,11 @@ class UIManager:
                      toolbar.centery + 1)))
 
         mouse_pos = pygame.mouse.get_pos()
+        arrow = self.transition_button_rect
+        self._button(arrow, "", active=self.transition_tool,
+                     hovered=arrow.collidepoint(mouse_pos))
+        self._arrow_icon(arrow, palette.text_on_accent if self.transition_tool
+                         else palette.text_muted)
         pan = self.pan_button_rect
         self._button(pan, "", active=self.pan_tool,
                      hovered=pan.collidepoint(mouse_pos))
@@ -1256,10 +1388,37 @@ class UIManager:
         elif pointing == "down":
             points = [(mid_x - reach, mid_y - drop), (mid_x, mid_y + drop),
                       (mid_x + reach, mid_y - drop)]
+        elif pointing == "left":
+            points = [(mid_x + drop, mid_y - reach), (mid_x - drop, mid_y),
+                      (mid_x + drop, mid_y + reach)]
         else:  # "right", for a folded side panel
             points = [(mid_x - drop, mid_y - reach), (mid_x + drop, mid_y),
                       (mid_x - drop, mid_y + reach)]
         pygame.draw.lines(self.screen, colour, False, points, 2)
+
+    def _play_icon(self, rect: pygame.Rect, colour) -> None:
+        cx, cy = rect.centerx, rect.centery
+        primitives.polygon(self.screen, [(cx - 4, cy - 6), (cx + 6, cy),
+                                         (cx - 4, cy + 6)], colour)
+
+    def _pause_icon(self, rect: pygame.Rect, colour) -> None:
+        cx, cy = rect.centerx, rect.centery
+        for offset in (-5, 1):
+            pygame.draw.rect(self.screen, colour,
+                             pygame.Rect(cx + offset, cy - 6, 4, 12),
+                             border_radius=1)
+
+    def _cross_icon(self, rect: pygame.Rect, colour) -> None:
+        cx, cy = rect.centerx, rect.centery
+        pygame.draw.line(self.screen, colour, (cx - 5, cy - 5), (cx + 5, cy + 5), 2)
+        pygame.draw.line(self.screen, colour, (cx + 5, cy - 5), (cx - 5, cy + 5), 2)
+
+    def _arrow_icon(self, rect: pygame.Rect, colour) -> None:
+        """A short arrow, for the transition tool."""
+        cx, cy = rect.centerx, rect.centery
+        pygame.draw.line(self.screen, colour, (cx - 8, cy + 3), (cx + 5, cy - 4), 2)
+        primitives.polygon(self.screen, [(cx + 8, cy - 6), (cx + 3, cy - 5),
+                                         (cx + 6, cy - 1)], colour)
 
     def _draw_verdict(self, message: str, panel: pygame.Rect) -> None:
         """Show the result of the last run, coloured by its verdict.
@@ -1548,33 +1707,27 @@ class UIManager:
 
             row_y += 40
 
-    def _draw_playback_controls(self, x: int, y: int):
-        """Playback state and speed, inside the run panel.
+    def _draw_playback_controls(self):
+        """The step-speed slider, inside the run panel.
 
-        These used to live in the status panel and were drawn whether or not
+        This used to live in the status panel and was drawn whether or not
         anything was running -- a "Paused" dot and a speed slider for an
         animation that did not exist, which is most of what made that panel
-        look half empty.
+        look half empty. The dot is gone as well: the play button shows
+        whether playback is running, so a second indicator saying the same
+        thing is just something else to keep in step.
         """
         palette = self.theme.palette
         slider = self.speed_slider_rect
         if slider is None:
             return
-        animating = getattr(self, '_animation_active', False)
-
-        dot_colour = palette.success if animating else palette.text_faint
-        primitives.filled_circle(self.screen, (x + 4, y + 7), 4, dot_colour)
-        label = "Playing" if animating else "Paused"
-        self.screen.blit(
-            self.fonts.ui("small").render(label, True, palette.text_muted),
-            (x + 15, y))
 
         speed_ratio = (self.animation_speed - SPEED_MIN_MS) / (SPEED_MAX_MS - SPEED_MIN_MS)
         speed_ratio = max(0.0, min(1.0, speed_ratio))
         self.screen.blit(
             self.fonts.ui("small").render(f"{self.animation_speed} ms", True,
                                           palette.text_faint),
-            (x + 78, y))
+            (slider.right + 12, slider.y))
 
         # Track, filled portion, then handle, following the slid panel.
         track = pygame.Rect(slider.x, slider.centery - 2, slider.width, 4)
@@ -1982,14 +2135,37 @@ class UIManager:
             self.fonts.ui("small").render(detail, True, palette.text_muted),
             (x, y + 54))
 
+        # Transport. Every one of these was keyboard-only, so the panel listed
+        # four commands it gave the user no way to issue.
+        mouse_pos = pygame.mouse.get_pos()
+        back, play, forward, stop = self.layout.run_buttons(panel_rect)
+        animating = getattr(self, '_animation_active', False)
+        at_start = execution_step <= 0
+        at_end = execution_step >= total_steps
+
+        self._button(back, "", hovered=back.collidepoint(mouse_pos))
+        self._chevron(back, palette.text_faint if at_start else palette.text,
+                      pointing="left")
+
+        self._button(play, "", accent=True, hovered=play.collidepoint(mouse_pos))
+        if animating:
+            self._pause_icon(play, palette.text_on_accent)
+        else:
+            self._play_icon(play, palette.text_on_accent)
+
+        self._button(forward, "", hovered=forward.collidepoint(mouse_pos))
+        self._chevron(forward, palette.text_faint if at_end else palette.text,
+                      pointing="right")
+
+        self._button(stop, "", hovered=stop.collidepoint(mouse_pos))
+        self._cross_icon(stop, palette.error)
+
+        self._draw_playback_controls()
+
         hint = "N next   P back   Tab play   Esc stop"
         self.screen.blit(
             self.fonts.ui("small").render(hint, True, palette.text_faint),
-            (x, y + 74))
-
-        # Below the hint, not on top of it: both were positioned from opposite
-        # ends of the panel and met in the middle.
-        self._draw_playback_controls(x, y + 96)
+            (x, body.y + RUN_HINT_TOP))
 
     def _draw_add_symbol_dialog(self):
         """The add-symbol dialog, on the same modal frame as its siblings.

@@ -1718,6 +1718,139 @@ def test_edge_label_plates_are_visible_against_the_canvas():
         assert difference > 20, f"{name}: plate blends into the canvas"
 
 
+# ---------------------------------------------------------------------------
+# Phase 8: controls you can reach with the mouse
+# ---------------------------------------------------------------------------
+
+
+def test_the_transition_tool_draws_without_shift(app):
+    """Drawing a transition is the most common edit in the application and was
+    reachable only through a modifier nothing on screen mentioned."""
+    app.editor.remove_transition("q0", "a")
+    app.ui_manager.selected_symbol = "a"
+
+    click(app, app.ui_manager.transition_button_rect.center)
+    assert app.ui_manager.transition_tool
+
+    click(app, screen_of(app, "q0"))
+    assert app.editor.pending_source == "q0"
+    click(app, screen_of(app, "q2"))
+
+    assert app.editor.automaton.target("q0", "a") == "q2"
+    assert app.editor.pending_source is None
+
+
+def test_shift_click_still_draws_a_transition(app):
+    """The tool is the discoverable route; shift stays as the shortcut."""
+    app.editor.remove_transition("q0", "a")
+    app.ui_manager.selected_symbol = "a"
+
+    click(app, screen_of(app, "q0"), shift=True)
+    click(app, screen_of(app, "q2"))
+    assert app.editor.automaton.target("q0", "a") == "q2"
+
+
+def test_tools_are_exclusive_and_click_off(app):
+    """One name, not a flag per tool: two booleans can both be true."""
+    manager = app.ui_manager
+    click(app, manager.transition_button_rect.center)
+    assert manager.transition_tool and not manager.pan_tool
+
+    click(app, manager.pan_button_rect.center)
+    assert manager.pan_tool and not manager.transition_tool
+
+    click(app, manager.pan_button_rect.center)
+    assert manager.tool == "pointer"
+
+
+def test_choosing_a_tool_abandons_a_half_drawn_transition(app):
+    """The arrow was following a pointer that is now doing something else."""
+    app.editor.begin_transition("q0")
+    click(app, app.ui_manager.pan_button_rect.center)
+    assert app.editor.pending_source is None
+
+
+def test_the_run_transport_buttons_drive_the_run(app):
+    """The panel listed four keyboard commands and gave no way to issue them."""
+    app._test_string("ab")
+    pump(app, frames=40)
+    panel = next(r for key, r, _t in app.ui_manager._column if key == "run")
+    back, play, forward, stop = app.ui_manager.layout.run_buttons(panel)
+
+    click(app, forward.center)
+    assert app.execution_step == 1
+    click(app, back.center)
+    assert app.execution_step == 0
+
+    click(app, play.center)
+    assert app.animation_active
+    click(app, play.center)
+    assert not app.animation_active
+
+    click(app, stop.center)
+    assert not app.execution_active
+
+
+def test_the_confirm_dialog_can_be_answered_with_the_mouse(app):
+    """It was keyboard-only: every click was swallowed, so the buttons a mouse
+    user goes looking for did not exist at all."""
+    manager = app.ui_manager
+    manager.show_confirm("Discard unsaved changes?", "load_after_confirm")
+    pump(app, frames=2)
+    cancel, confirm = manager.layout.confirm_buttons(manager._confirm_rect())
+
+    click(app, cancel.center)
+    assert manager.confirm_intent is None
+
+    manager.show_confirm("Discard unsaved changes?", "load_after_confirm")
+    assert manager._handle_modal_click(confirm.center) == {
+        'confirmed': 'load_after_confirm'}
+
+
+def test_the_confirm_button_names_the_action(app):
+    """"Yes" to a question the user has to re-read is worse than a verb."""
+    manager = app.ui_manager
+    manager.show_confirm("Quit without saving?", "quit_after_confirm")
+    pump(app, frames=2)
+    # Drawing must not raise, and the intent decides the label.
+    assert manager.confirm_intent == "quit_after_confirm"
+
+
+def test_the_save_prompt_can_be_confirmed_with_the_mouse(app, tmp_path):
+    manager = app.ui_manager
+    manager.show_file_prompt("save", "by_mouse.json")
+    pump(app, frames=2)
+    _cancel, confirm = manager.layout.confirm_buttons(manager._file_prompt_rect())
+
+    click(app, confirm.center)
+    assert manager.file_prompt_mode is None
+    assert (tmp_path / "by_mouse.json").exists()
+
+
+def test_the_save_prompt_can_be_cancelled_with_the_mouse(app, tmp_path):
+    manager = app.ui_manager
+    manager.show_file_prompt("save", "never.json")
+    pump(app, frames=2)
+    cancel, _confirm = manager.layout.confirm_buttons(manager._file_prompt_rect())
+
+    click(app, cancel.center)
+    assert manager.file_prompt_mode is None
+    assert not (tmp_path / "never.json").exists()
+
+
+def test_the_prompt_button_and_the_enter_key_agree(app):
+    """Both routes go through one submit, so they cannot reach different
+    conclusions about what the prompt meant."""
+    manager = app.ui_manager
+    manager.show_rename_prompt("q1", "q1")
+    for char in "even":
+        press(app, ord(char), char)
+    _cancel, confirm = manager.layout.confirm_buttons(manager._file_prompt_rect())
+
+    click(app, confirm.center)
+    assert app.editor.automaton.label_of("q1") == "even"
+
+
 def test_elide_shortens_only_what_does_not_fit(app):
     font = app.renderer.fonts.scaled("state", 1.0)
     budget = default_state_radius() * 1.7

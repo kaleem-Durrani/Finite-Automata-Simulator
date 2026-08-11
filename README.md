@@ -47,7 +47,8 @@ python main.py
 | Action | Effect |
 |---|---|
 | Left click | Select a state, or drag it |
-| Shift + left click | Start creating a transition (then click the target state) |
+| Arrow tool + click | Click the source state, then its target, to draw a transition |
+| Shift + left click | The same thing without leaving the pointer tool |
 | Right click | Open a context menu for a state, a transition arrow, or the canvas |
 | Space + drag | Pan the view — or switch on the hand tool in the toolbar |
 | Right or middle drag | Pan the view |
@@ -59,6 +60,15 @@ where there is no middle button to hold.
 
 `Space` is the same story in one key: held it pans, tapped it adds a state. Which one it was is
 only knowable when the key comes up, so the state appears on release.
+
+### Tools and dialogs
+
+The toolbar carries two tools beside the file buttons: an arrow that draws
+transitions and a hand that pans. They are exclusive, and clicking the active one
+returns you to the pointer. Every keyboard command has a button too — the run panel
+has back, play/pause, forward and stop, and every dialog has real Cancel and confirm
+buttons. The confirm button names what it will do ("Quit", "Discard", "Save") rather
+than saying "Yes" to a question you would have to read twice.
 
 ### Panels
 
@@ -104,7 +114,7 @@ is one, and vice versa.
 
 1. Press `Space` a few times to add states.
 2. Pick a symbol from the palette at the top left.
-3. Shift+click a state to begin a transition, then click the target state.
+3. Switch on the arrow tool, click a state, then click the target.
 4. Right-click a state and choose Accepting.
 5. Type a string into the input field at the bottom and press `Enter`.
 6. Press `N` and `P` to step through the run.
