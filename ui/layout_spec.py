@@ -9,10 +9,16 @@ the toolbar; anything below height-150 is the input area"). Those bands did not
 match what was actually drawn: they covered a third to a half of the window,
 which killed right-click over most of the canvas, while missing the status
 panel and the execution panel entirely.
+
+Regions whose size depends on content -- how many symbols exist, whether a
+panel is collapsed -- are methods rather than fields. They still live here, so
+there is still exactly one definition of where anything sits; they just cannot
+be computed from the window size alone.
 """
 
+import math
 from dataclasses import dataclass
-from typing import List
+from typing import Tuple
 
 import pygame
 
@@ -21,34 +27,52 @@ TOOLBAR_HEIGHT = 50
 TOOLBAR_BUTTON = (80, 30)
 TOOLBAR_BUTTON_Y = 10
 TOOLBAR_BUTTON_GAP = 10
+#: The pan tool is an icon, not a word, so it gets a square button.
+TOOL_BUTTON_WIDTH = 38
+#: Space between the tool group and the file/theme group.
+TOOLBAR_GROUP_GAP = 18
 
-# Symbol palette
-SYMBOL_PANEL_TOP = TOOLBAR_HEIGHT
-SYMBOL_PANEL_HEIGHT = 70
-SYMBOL_BUTTON = (40, 30)
-SYMBOL_BUTTON_GAP = 5
-SYMBOL_ROW_ORIGIN = (20, TOOLBAR_HEIGHT + 35)
+# Floating symbol palette.
+#
+# A card on the canvas rather than a full-width band. The band ran the whole
+# width of the window, so the right-hand panels were drawn on top of it, and it
+# reserved 70px of height to show one 30px row of chips. The card is only as
+# wide as the alphabet it holds and sits clear of everything else.
+SYMBOL_MARGIN = 12
+SYMBOL_CHIP = (34, 30)
+SYMBOL_CHIP_GAP = 6
+SYMBOL_CARD_PAD = 9
+#: Room for the caption printed down the left of the card, so the palette says
+#: what it is without a separate heading above it.
+SYMBOL_CAPTION_WIDTH = 60
+#: Chips wrap past this many, so a large alphabet grows downward in a tidy grid
+#: instead of running off the side of the window.
+SYMBOLS_PER_ROW = 12
 
-# Status panel (top right)
-STATUS_WIDTH = 300
-STATUS_HEIGHT = 170
-STATUS_MARGIN = 12
+# Right-hand column
+PANEL_WIDTH = 280
+PANEL_MARGIN = 12
+PANEL_GAP = 8
+#: Every panel is an accordion: the header is always drawn and is the click
+#: target that opens and closes it. Collapsed, the header *is* the panel -- the
+#: notch that says what is inside without spending the space to show it.
+PANEL_HEADER_HEIGHT = 34
 
-# Speed slider, inside the status panel
+# Speed slider, inside the run panel
 SLIDER_SIZE = (150, 16)
-SLIDER_OFFSET = (12, 140)
 SPEED_MIN_MS = 500
 SPEED_MAX_MS = 3000
 
-# Execution panel, below the status panel
-EXECUTION_WIDTH = 300
-EXECUTION_HEIGHT = 120
-
-# Input area (bottom left). Tall enough for the caption, the field, and the
-# verdict badge with its explanation underneath -- the badge used to be drawn
-# past the bottom edge of its own panel.
-INPUT_PANEL_SIZE = (600, 118)
-INPUT_PANEL_MARGIN = 12
+# Test-string panel (bottom left).
+#
+# One row: the field and the Test button. The caption is gone -- a text field
+# with a Test button beside it does not need to be told it tests a string --
+# and the verdict band only exists once there is a verdict to put in it.
+INPUT_MARGIN = 12
+INPUT_WIDTH = 430
+INPUT_ROW_HEIGHT = 56
+INPUT_VERDICT_HEIGHT = 46
+INPUT_COLLAPSED_SIZE = (150, 34)
 
 # Help panel (centred)
 HELP_PANEL_SIZE = (420, 500)
@@ -65,22 +89,11 @@ class LayoutSpec:
     height: int
 
     toolbar: pygame.Rect
+    pan_button: pygame.Rect
     theme_button: pygame.Rect
     load_button: pygame.Rect
     save_button: pygame.Rect
     help_button: pygame.Rect
-
-    symbol_panel: pygame.Rect
-    symbol_row_origin: tuple
-
-    status_panel: pygame.Rect
-    speed_slider: pygame.Rect
-
-    execution_panel: pygame.Rect
-
-    input_panel: pygame.Rect
-    input_field: pygame.Rect
-    test_button: pygame.Rect
 
     help_panel: pygame.Rect
 
@@ -96,36 +109,9 @@ class LayoutSpec:
         save_button = pygame.Rect(width - step * 2, TOOLBAR_BUTTON_Y, button_w, button_h)
         load_button = pygame.Rect(width - step * 3, TOOLBAR_BUTTON_Y, button_w, button_h)
         theme_button = pygame.Rect(width - step * 4, TOOLBAR_BUTTON_Y, button_w, button_h)
-
-        status_panel = pygame.Rect(
-            width - STATUS_WIDTH - STATUS_MARGIN,
-            SYMBOL_PANEL_TOP + 10,
-            STATUS_WIDTH,
-            STATUS_HEIGHT,
-        )
-        speed_slider = pygame.Rect(
-            status_panel.x + SLIDER_OFFSET[0],
-            status_panel.y + SLIDER_OFFSET[1],
-            SLIDER_SIZE[0],
-            SLIDER_SIZE[1],
-        )
-
-        execution_panel = pygame.Rect(
-            width - EXECUTION_WIDTH - STATUS_MARGIN,
-            status_panel.bottom + 10,
-            EXECUTION_WIDTH,
-            EXECUTION_HEIGHT,
-        )
-
-        panel_w, panel_h = INPUT_PANEL_SIZE
-        input_panel = pygame.Rect(
-            INPUT_PANEL_MARGIN,
-            height - panel_h - INPUT_PANEL_MARGIN,
-            min(panel_w, width - INPUT_PANEL_MARGIN * 2),
-            panel_h,
-        )
-        input_field = pygame.Rect(input_panel.x + 12, input_panel.y + 34, 240, 34)
-        test_button = pygame.Rect(input_field.right + 10, input_field.y, 82, 34)
+        pan_button = pygame.Rect(
+            theme_button.x - TOOLBAR_GROUP_GAP - TOOL_BUTTON_WIDTH,
+            TOOLBAR_BUTTON_Y, TOOL_BUTTON_WIDTH, button_h)
 
         help_w, help_h = HELP_PANEL_SIZE
         help_panel = pygame.Rect(
@@ -135,51 +121,121 @@ class LayoutSpec:
             min(help_h, height - TOOLBAR_HEIGHT - 20),
         )
 
-        string_strip = pygame.Rect(0, input_panel.y - 52, width, 44)
+        # The tape strip sits above the test panel's single row.
+        strip_y = height - INPUT_MARGIN - INPUT_ROW_HEIGHT - 8 - 44
+        string_strip = pygame.Rect(0, strip_y, width, 44)
 
         return cls(
             width=width,
             height=height,
             toolbar=pygame.Rect(0, 0, width, TOOLBAR_HEIGHT),
+            pan_button=pan_button,
             theme_button=theme_button,
             load_button=load_button,
             save_button=save_button,
             help_button=help_button,
-            symbol_panel=pygame.Rect(0, SYMBOL_PANEL_TOP, width, SYMBOL_PANEL_HEIGHT),
-            symbol_row_origin=SYMBOL_ROW_ORIGIN,
-            status_panel=status_panel,
-            speed_slider=speed_slider,
-            execution_panel=execution_panel,
-            input_panel=input_panel,
-            input_field=input_field,
-            test_button=test_button,
             help_panel=help_panel,
             string_strip=string_strip,
         )
+
+    # ------------------------------------------------------------------
+    # Symbol palette
+    # ------------------------------------------------------------------
+
+    def symbol_card(self, count: int) -> pygame.Rect:
+        """The floating palette card holding ``count`` chips.
+
+        ``count`` includes the trailing add button, because it is laid out in
+        the same grid and the card has to be wide enough to contain it.
+        """
+        count = max(1, count)
+        columns = min(count, SYMBOLS_PER_ROW)
+        rows = math.ceil(count / SYMBOLS_PER_ROW)
+        chip_w, chip_h = SYMBOL_CHIP
+        inner_w = columns * chip_w + (columns - 1) * SYMBOL_CHIP_GAP
+        inner_h = rows * chip_h + (rows - 1) * SYMBOL_CHIP_GAP
+        return pygame.Rect(
+            SYMBOL_MARGIN,
+            TOOLBAR_HEIGHT + SYMBOL_MARGIN,
+            SYMBOL_CAPTION_WIDTH + inner_w + SYMBOL_CARD_PAD * 2,
+            inner_h + SYMBOL_CARD_PAD * 2,
+        )
+
+    def symbol_chip(self, index: int, count: int) -> pygame.Rect:
+        """Rectangle for the nth chip in the palette."""
+        card = self.symbol_card(count)
+        chip_w, chip_h = SYMBOL_CHIP
+        column = index % SYMBOLS_PER_ROW
+        row = index // SYMBOLS_PER_ROW
+        return pygame.Rect(
+            card.x + SYMBOL_CARD_PAD + SYMBOL_CAPTION_WIDTH
+            + column * (chip_w + SYMBOL_CHIP_GAP),
+            card.y + SYMBOL_CARD_PAD + row * (chip_h + SYMBOL_CHIP_GAP),
+            chip_w, chip_h,
+        )
+
+    # ------------------------------------------------------------------
+    # Test-string panel
+    # ------------------------------------------------------------------
+
+    def input_panel(self, *, expanded: bool, has_verdict: bool) -> pygame.Rect:
+        """Where the test-string panel sits, in whichever form it is in."""
+        if not expanded:
+            w, h = INPUT_COLLAPSED_SIZE
+            return pygame.Rect(INPUT_MARGIN, self.height - h - INPUT_MARGIN, w, h)
+        height = INPUT_ROW_HEIGHT + (INPUT_VERDICT_HEIGHT if has_verdict else 0)
+        width = min(INPUT_WIDTH, self.width - INPUT_MARGIN * 2)
+        return pygame.Rect(INPUT_MARGIN, self.height - height - INPUT_MARGIN,
+                           width, height)
+
+    def input_field(self, panel: pygame.Rect) -> pygame.Rect:
+        """The text field inside an expanded test panel."""
+        return pygame.Rect(panel.x + 11, panel.y + 11,
+                           panel.width - 11 - 82 - 10 - 34, 34)
+
+    def test_button(self, panel: pygame.Rect) -> pygame.Rect:
+        field = self.input_field(panel)
+        return pygame.Rect(field.right + 10, field.y, 82, 34)
+
+    def input_collapse_button(self, panel: pygame.Rect) -> pygame.Rect:
+        """The chevron that folds the test panel away."""
+        return pygame.Rect(panel.right - 30, panel.y + 13, 22, 22)
+
+    # ------------------------------------------------------------------
+    # Right-hand column
+    # ------------------------------------------------------------------
+
+    def column_home_x(self) -> int:
+        return self.width - PANEL_WIDTH - PANEL_MARGIN
+
+    def column_top(self) -> int:
+        return TOOLBAR_HEIGHT + PANEL_MARGIN
+
+    def column_limit(self) -> int:
+        """The lowest a panel may reach before it is dropped.
+
+        Kept clear of the tape strip so the column cannot stack down over it.
+        """
+        return self.string_strip.top - 8
+
+    # ------------------------------------------------------------------
+    # Help
+    # ------------------------------------------------------------------
 
     def help_visible_lines(self) -> int:
         """How many help lines fit in the panel at once."""
         content = self.help_panel.height - HELP_TITLE_HEIGHT - HELP_FOOTER_HEIGHT
         return max(1, content // HELP_LINE_HEIGHT)
 
-    def symbol_button(self, index: int) -> pygame.Rect:
-        """Rectangle for the nth button in the symbol palette."""
-        x0, y0 = self.symbol_row_origin
-        w, h = SYMBOL_BUTTON
-        return pygame.Rect(x0 + index * (w + SYMBOL_BUTTON_GAP), y0, w, h)
+    def speed_slider(self, panel: pygame.Rect) -> pygame.Rect:
+        """The playback-speed slider, inside whichever panel hosts it."""
+        return pygame.Rect(panel.x + 12, panel.bottom - 26,
+                           SLIDER_SIZE[0], SLIDER_SIZE[1])
 
-    def opaque_panels(self, *, execution_active: bool, help_open: bool) -> List[pygame.Rect]:
-        """
-        The regions currently painted over the canvas.
+    def panel_header(self, panel: pygame.Rect) -> pygame.Rect:
+        """The always-drawn header strip that toggles a panel open and shut."""
+        return pygame.Rect(panel.x, panel.y, panel.width, PANEL_HEADER_HEIGHT)
 
-        A click landing on one of these belongs to the UI and must not also be
-        interpreted as a click on the automaton behind it. Panels that are not
-        currently drawn are not included, so the canvas is as large as it
-        actually looks.
-        """
-        panels = [self.toolbar, self.symbol_panel, self.status_panel, self.input_panel]
-        if execution_active:
-            panels.append(self.execution_panel)
-        if help_open:
-            panels.append(self.help_panel)
-        return panels
+
+def chip_size() -> Tuple[int, int]:
+    return SYMBOL_CHIP

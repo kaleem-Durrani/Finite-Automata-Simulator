@@ -18,14 +18,12 @@ from rendering.theme import Theme
 from ui.layout_spec import (
     HELP_LINE_HEIGHT,
     HELP_TITLE_HEIGHT,
-    SLIDER_OFFSET,
-    SLIDER_SIZE,
+    PANEL_GAP,
+    PANEL_HEADER_HEIGHT,
+    PANEL_MARGIN,
+    PANEL_WIDTH,
     SPEED_MAX_MS,
     SPEED_MIN_MS,
-    STATUS_HEIGHT,
-    STATUS_MARGIN,
-    STATUS_WIDTH,
-    SYMBOL_PANEL_TOP,
     LayoutSpec,
 )
 
@@ -39,12 +37,22 @@ HELP_LINES = [
     "- Shift+Click: Start transition",
     "- Right Click: Menu for a state",
     "  or a transition arrow",
-    "- Right/Middle Drag: Pan view",
+    "- Space+Drag: Pan the view",
+    "  (or switch on the hand tool)",
+    "- Right/Middle Drag: Pan too",
     "- Scroll Wheel: Zoom",
+    "",
+    "Panels:",
+    "- Click a panel's title to fold",
+    "  it away; the title stays as",
+    "  the notch that reopens it",
+    "- The test box folds down to",
+    "  a pill in the bottom corner",
     "",
     "Keyboard Shortcuts:",
     "- Ctrl+Z / Ctrl+Y: Undo / Redo",
-    "- Space: Add state at center",
+    "- Space: Tap to add a state,",
+    "  hold to pan the view",
     "- Delete: Remove selected state",
     "- Q: Toggle accepting",
     "- W: Make a trap (loop all",
@@ -80,6 +88,16 @@ HELP_LINES = [
     "  the project folder",
 ]
 
+
+#: What each right-hand panel is called. A collapsed panel shows only this, so
+#: it doubles as the notch's label: folding a panel away must not cost the user
+#: the knowledge of what is inside it.
+PANEL_TITLES = {
+    "status": "Automaton",
+    "run": "Run",
+    "diagnostics": "Diagnostics",
+    "legend": "Legend",
+}
 
 CONTEXT_MENU_WIDTH = 168
 CONTEXT_MENU_ITEM_HEIGHT = 27
@@ -197,6 +215,25 @@ class UIManager:
         # scales each panel's occupied height by its slide value, so when one
         # leaves, the panels below glide up instead of jumping.
         self.slides: Dict[str, Animated] = {}
+
+        # Collapsed panels keep their header and drop their body. The header is
+        # the notch: it still names what is inside, so folding a panel away
+        # never costs the user the knowledge that it exists. Each panel also
+        # eases between the two heights rather than snapping.
+        self.collapsed: Dict[str, bool] = {}
+        self.opens: Dict[str, Animated] = {}
+
+        # The test panel folds down to a labelled pill. It is the least often
+        # needed thing on screen and it was the largest, so it starts folded
+        # and opens on a click or as soon as a run reports a verdict.
+        self.input_expanded = False
+
+        # Hand tool: while it is on, dragging anywhere on the canvas pans.
+        # Holding space does the same without leaving the pointer tool, which
+        # is the shortcut every drawing program uses. The space half lives in
+        # the application, which owns canvas interaction; this is only the
+        # toolbar's toggle.
+        self.pan_tool = False
 
         # This frame's right-column rects, for hit-testing. Recomputed at the
         # top of draw(); events read the previous frame's values, which is
@@ -319,21 +356,41 @@ class UIManager:
         clicked on the first frame it exists instead of only after it has been
         painted once.
         """
+        count = len(self.available_symbols) + 1  # the add button shares the grid
         self.symbol_buttons = {
-            symbol: self.layout.symbol_button(index)
+            symbol: self.layout.symbol_chip(index, count)
             for index, symbol in enumerate(self.available_symbols)
         }
-        self.add_symbol_button_rect = self.layout.symbol_button(len(self.available_symbols))
+        self.add_symbol_button_rect = self.layout.symbol_chip(count - 1, count)
 
     # Named rectangles are read straight from the layout so that drawing and
     # hit-testing cannot drift apart.
     @property
+    def symbol_card_rect(self) -> pygame.Rect:
+        """The floating palette card, sized to the current alphabet."""
+        return self.layout.symbol_card(len(self.available_symbols) + 1)
+
+    @property
+    def input_panel_rect(self) -> pygame.Rect:
+        """The test panel in whichever form it is currently in."""
+        return self.layout.input_panel(expanded=self.input_expanded,
+                                       has_verdict=bool(self.test_result))
+
+    @property
     def input_rect(self) -> pygame.Rect:
-        return self.layout.input_field
+        return self.layout.input_field(self.input_panel_rect)
 
     @property
     def test_button_rect(self) -> pygame.Rect:
-        return self.layout.test_button
+        return self.layout.test_button(self.input_panel_rect)
+
+    @property
+    def input_collapse_rect(self) -> pygame.Rect:
+        return self.layout.input_collapse_button(self.input_panel_rect)
+
+    @property
+    def pan_button_rect(self) -> pygame.Rect:
+        return self.layout.pan_button
 
     @property
     def help_button_rect(self) -> pygame.Rect:
@@ -352,17 +409,18 @@ class UIManager:
         return self.layout.theme_button
 
     @property
-    def speed_slider_rect(self) -> pygame.Rect:
-        """The slider tracks the status panel wherever it has slid to."""
+    def speed_slider_rect(self) -> Optional[pygame.Rect]:
+        """The slider tracks the run panel wherever it has slid to.
+
+        The playback controls belong to a run, so they exist only while one
+        does. They used to be drawn in the status panel at all times, which is
+        most of what made that panel look half empty: a paused readout and a
+        speed slider for an animation that was not playing.
+        """
         for key, rect, _t in self._column:
-            if key == "status":
-                # Derived from the same constants as the static layout rect.
-                # An earlier version hardcoded the numbers here, so adjusting
-                # them in layout_spec silently moved only one of the two.
-                return pygame.Rect(rect.x + SLIDER_OFFSET[0],
-                                   rect.y + SLIDER_OFFSET[1],
-                                   SLIDER_SIZE[0], SLIDER_SIZE[1])
-        return self.layout.speed_slider
+            if key == "run" and not self.collapsed.get("run"):
+                return self.layout.speed_slider(rect)
+        return None
 
     def update_screen_size(self, width: int, height: int):
         """
@@ -431,9 +489,23 @@ class UIManager:
         return entry.value
 
     def _diagnostic_height(self) -> int:
-        """How tall the diagnostics panel wants to be for its current rows."""
+        """How tall the diagnostics body wants to be for its current rows."""
         rows = min(len(self.diagnostics), 4)
-        return 40 + rows * 40
+        return rows * 40 + 6
+
+    def _open(self, key: str) -> float:
+        """The 0..1 openness of a panel, easing toward collapsed or expanded."""
+        entry = self.opens.get(key)
+        if entry is None:
+            entry = Animated(value=1.0, target=1.0,
+                             duration=self.theme.motion.quick, easing=ease_out)
+            self.opens[key] = entry
+        entry.set(0.0 if self.collapsed.get(key) else 1.0)
+        return entry.value
+
+    def toggle_panel(self, key: str) -> None:
+        """Fold a right-hand panel away, or bring it back."""
+        self.collapsed[key] = not self.collapsed.get(key, False)
 
     def compute_right_column(self, execution_active: bool,
                              legend_rows: int) -> List[Tuple[str, pygame.Rect, float]]:
@@ -443,34 +515,43 @@ class UIManager:
         content counts known before drawing. Each panel slides horizontally by
         its own progress, and the space it occupies scales with that progress,
         so panels below glide up as one above departs instead of jumping.
-        """
-        width, margin, gap = STATUS_WIDTH, STATUS_MARGIN, 10
-        home_x = self.screen_width - width - margin
-        y = float(SYMBOL_PANEL_TOP + 10)
 
-        # Stop stacking where the tape strip band begins: on a short window the
-        # column used to run straight off the bottom and over the input panel.
-        # Panels are dropped lowest-first, which is also priority order.
-        limit = self.layout.string_strip.top - 8
+        A panel's height is now its header plus however much body it currently
+        wants, eased between the two so collapsing glides. Bodies are sized
+        from their content rather than from a fixed constant, which is what
+        left every panel looking half empty.
+        """
+        width, margin, gap = PANEL_WIDTH, PANEL_MARGIN, PANEL_GAP
+        home_x = self.layout.column_home_x()
+        y = float(self.layout.column_top())
+        limit = self.layout.column_limit()
 
         wanted = [
-            ("status", True, STATUS_HEIGHT),
-            ("run", execution_active, 128),
+            ("status", True, self._status_body_height()),
+            ("run", execution_active, 146),
             ("diagnostics", bool(self.diagnostics), self._diagnostic_height()),
-            ("legend", legend_rows >= 2, 30 + legend_rows * 22),
+            ("legend", legend_rows >= 2, legend_rows * 22 + 6),
         ]
 
         column: List[Tuple[str, pygame.Rect, float]] = []
-        for key, visible, height in wanted:
-            fits = y + height <= limit
+        for key, visible, body in wanted:
+            height = PANEL_HEADER_HEIGHT + int(body * self._open(key))
+            # A collapsed panel is a header, and a header always fits, so only
+            # the expanded height can push a panel off the bottom.
+            fits = y + PANEL_HEADER_HEIGHT <= limit
             t = self._slide(key, visible and fits)
             if t <= 0.01:
                 continue
+            height = min(height, max(PANEL_HEADER_HEIGHT, int(limit - y)))
             offset = (1.0 - t) * (width + margin * 2)
             rect = pygame.Rect(int(home_x + offset), int(y), width, height)
             column.append((key, rect, t))
             y += (height + gap) * t
         return column
+
+    def _status_body_height(self) -> int:
+        """Four rows, plus the warning line only when there is one."""
+        return 4 * 19 + (18 if self.warn_no_accepting else 0) + 12
 
     def opaque_panels(self) -> List[pygame.Rect]:
         """The UI regions currently painted over the canvas.
@@ -478,8 +559,8 @@ class UIManager:
         The right column contributes its panels only once they are mostly on
         screen, so a panel sliding away releases the canvas underneath it.
         """
-        panels = [self.layout.toolbar, self.layout.symbol_panel,
-                  self.layout.input_panel]
+        panels = [self.layout.toolbar, self.symbol_card_rect,
+                  self.input_panel_rect]
         panels += [rect for _key, rect, t in self._column if t > 0.5]
         # The strip's opaque region is what was actually drawn, not the
         # full-width band it lives in -- clicks beside the cells belong to
@@ -512,11 +593,26 @@ class UIManager:
             (self.layout.save_button, self._on_save_button),
             (self.layout.load_button, self._on_load_button),
             (self.layout.theme_button, self._on_theme_button),
-            (self.layout.test_button, self._on_test_button),
-            (self.layout.input_field, self._on_input_field),
-            (self.layout.speed_slider, self._on_speed_slider),
+            (self.layout.pan_button, self._on_pan_button),
             (self.add_symbol_button_rect, self._on_add_symbol_button),
         ]
+        if self.input_expanded:
+            # The collapse chevron sits inside the panel, so it has to be
+            # tested before the panel's own widgets.
+            hits.append((self.input_collapse_rect, self._on_input_collapse))
+            hits.append((self.test_button_rect, self._on_test_button))
+            hits.append((self.input_rect, self._on_input_field))
+        else:
+            hits.append((self.input_panel_rect, self._on_input_expand))
+        slider = self.speed_slider_rect
+        if slider is not None:
+            hits.append((slider, self._on_speed_slider))
+        # Panel headers toggle their panel. Added before the body widgets so a
+        # header click never falls through to whatever is drawn beneath it.
+        for key, rect, t in self._column:
+            if t > 0.5:
+                hits.append((self.layout.panel_header(rect),
+                             self._panel_header_handler(key)))
         if self._fix_button is not None:
             hits.append((self._fix_button, self._on_fix_button))
         for row_rect, payload in self._diagnostic_rows:
@@ -531,6 +627,26 @@ class UIManager:
         self.show_help = not self.show_help
         self.help_scroll_offset = 0
         return {'toggle_help': True}
+
+    def _on_pan_button(self, _pos) -> Dict[str, Any]:
+        self.pan_tool = not self.pan_tool
+        return {'pan_tool': self.pan_tool}
+
+    def _on_input_collapse(self, _pos) -> Dict[str, Any]:
+        self.input_expanded = False
+        self.input_active = False
+        return {'input_collapsed': True}
+
+    def _on_input_expand(self, _pos) -> Dict[str, Any]:
+        self.input_expanded = True
+        self.input_active = True
+        return {'input_expanded': True}
+
+    def _panel_header_handler(self, key: str):
+        def handler(_pos) -> Dict[str, Any]:
+            self.toggle_panel(key)
+            return {'panel_toggled': key}
+        return handler
 
     def _on_save_button(self, _pos) -> Dict[str, Any]:
         return {'save_automaton': True}
@@ -574,7 +690,9 @@ class UIManager:
 
     def _set_speed_from_x(self, x: int) -> Dict[str, Any]:
         """Map an x coordinate on the slider to an animation speed."""
-        slider = self.layout.speed_slider
+        slider = self.speed_slider_rect
+        if slider is None:
+            return {}
         ratio = (x - slider.x) / slider.width
         ratio = max(0.0, min(1.0, ratio))
         self.animation_speed = int(
@@ -618,7 +736,11 @@ class UIManager:
 
         for rect, handler in self._widget_hits():
             if rect.collidepoint(pos):
-                self.input_active = rect is self.layout.input_field
+                # Focus belongs to the field alone, so clicking any other
+                # widget drops it and the two handlers that own the field set
+                # it back. Identity against a layout rect used to decide this,
+                # which stopped working once rects became computed values.
+                self.input_active = False
                 self._pressed_rect = pygame.Rect(rect)
                 return handler(pos), True
 
@@ -858,9 +980,12 @@ class UIManager:
                     if self.input_text:
                         self.input_text = self.input_text[:-1]
 
-        # Panel slides and tape motion close toward their targets every frame.
+        # Panel slides, folds and tape motion close toward their targets every
+        # frame.
         for slide in self.slides.values():
             slide.update(dt)
+        for opening in self.opens.values():
+            opening.update(dt)
         self.strip_scroll.update(dt)
         self.strip_pop.update(dt)
 
@@ -1018,6 +1143,11 @@ class UIManager:
                      toolbar.centery + 1)))
 
         mouse_pos = pygame.mouse.get_pos()
+        pan = self.pan_button_rect
+        self._button(pan, "", active=self.pan_tool,
+                     hovered=pan.collidepoint(mouse_pos))
+        self._hand_icon(pan, palette.text_on_accent if self.pan_tool
+                        else palette.text_muted)
         self._button(self.theme_button_rect,
                      "Light" if self.theme.is_dark else "Dark",
                      hovered=self.theme_button_rect.collidepoint(mouse_pos))
@@ -1031,15 +1161,36 @@ class UIManager:
     def _draw_input_area(self, automaton: "fsa.DFA", test_result: str):
         """Draw the input area for testing strings."""
         palette = self.theme.palette
-        panel = self.layout.input_panel
+        panel = self.input_panel_rect
+        mouse_pos = pygame.mouse.get_pos()
+
+        if not self.input_expanded:
+            # Folded: a pill that still says what it opens. This panel used to
+            # be 600x118 of permanently reserved canvas for one text field.
+            hovered = panel.collidepoint(mouse_pos)
+            primitives.elevated_panel(
+                self.screen, panel,
+                palette.control_hover if hovered else palette.panel,
+                radius=self.theme.radius.lg, border=palette.border,
+                shadow=palette.shadow, bevel_light=palette.bevel_light,
+                bevel_dark=palette.bevel_dark)
+            label = self.fonts.ui("small_strong").render(
+                "Test a string", True, palette.text)
+            self.screen.blit(label, label.get_rect(
+                midleft=(panel.x + self.theme.space.md, panel.centery)))
+            self._chevron(pygame.Rect(panel.right - 30, panel.centery - 9, 18, 18),
+                          palette.text_muted, pointing="up")
+            return
+
         primitives.elevated_panel(self.screen, panel, palette.panel,
                                   radius=self.theme.radius.lg,
                                   border=palette.border, shadow=palette.shadow,
                                   bevel_light=palette.bevel_light,
                                   bevel_dark=palette.bevel_dark)
 
-        self._section_label("Test a string",
-                            (panel.x + self.theme.space.md, panel.y + 10))
+        collapse = self.input_collapse_rect
+        self._chevron(collapse, palette.accent if collapse.collidepoint(mouse_pos)
+                      else palette.text_muted, pointing="down")
 
         # The field is sunken -- the one recessed surface on a screen of raised
         # ones, which is what makes it read as "type here" without a label.
@@ -1076,12 +1227,39 @@ class UIManager:
             pygame.draw.line(self.screen, palette.accent,
                              (caret_x, field.top + 6), (caret_x, field.bottom - 6), 2)
 
-        mouse_pos = pygame.mouse.get_pos()
         self._button(self.test_button_rect, "Test", accent=True,
                      hovered=self.test_button_rect.collidepoint(mouse_pos))
 
         if test_result:
             self._draw_verdict(test_result, panel)
+
+    def _hand_icon(self, rect: pygame.Rect, colour) -> None:
+        """A small hand, for the pan tool. Drawn rather than typed: the glyph
+        for it is not in every font, and a missing glyph is a blank button."""
+        cx, cy = rect.centerx, rect.centery
+        palm = pygame.Rect(cx - 5, cy - 1, 10, 8)
+        pygame.draw.rect(self.screen, colour, palm, border_radius=3)
+        for index in range(3):
+            finger = pygame.Rect(cx - 5 + index * 4, cy - 7, 2, 7)
+            pygame.draw.rect(self.screen, colour, finger, border_radius=1)
+        thumb = pygame.Rect(cx + 4, cy - 3, 3, 5)
+        pygame.draw.rect(self.screen, colour, thumb, border_radius=1)
+
+    def _chevron(self, rect: pygame.Rect, colour, *, pointing: str) -> None:
+        """A small caret, drawn as three points rather than a glyph so it does
+        not depend on a font having the character."""
+        mid_x, mid_y = rect.centerx, rect.centery
+        reach, drop = 5, 3
+        if pointing == "up":
+            points = [(mid_x - reach, mid_y + drop), (mid_x, mid_y - drop),
+                      (mid_x + reach, mid_y + drop)]
+        elif pointing == "down":
+            points = [(mid_x - reach, mid_y - drop), (mid_x, mid_y + drop),
+                      (mid_x + reach, mid_y - drop)]
+        else:  # "right", for a folded side panel
+            points = [(mid_x - drop, mid_y - reach), (mid_x + drop, mid_y),
+                      (mid_x - drop, mid_y + reach)]
+        pygame.draw.lines(self.screen, colour, False, points, 2)
 
     def _draw_verdict(self, message: str, panel: pygame.Rect) -> None:
         """Show the result of the last run, coloured by its verdict.
@@ -1129,13 +1307,21 @@ class UIManager:
         producing them as a side effect of drawing.
         """
         palette = self.theme.palette
-        panel = self.layout.symbol_panel
-        pygame.draw.rect(self.screen, palette.panel, panel)
-        pygame.draw.line(self.screen, palette.border,
-                         (0, panel.bottom - 1), (panel.right, panel.bottom - 1))
+        card = self.symbol_card_rect
+        primitives.elevated_panel(self.screen, card, palette.panel,
+                                  radius=self.theme.radius.lg,
+                                  border=palette.border, shadow=palette.shadow,
+                                  bevel_light=palette.bevel_light,
+                                  bevel_dark=palette.bevel_dark)
 
-        self._section_label("Transition symbol",
-                            (self.layout.symbol_row_origin[0], panel.y + 8))
+        # The caption rides inside the card, down its left edge, so the palette
+        # explains itself without a heading above it claiming another row of
+        # height. The chips themselves are the point: what you can draw with is
+        # visible at all times, which is why this never collapses.
+        caption = self.fonts.ui("small_strong").render(
+            "SYMBOL", True, palette.text_faint)
+        self.screen.blit(caption, caption.get_rect(
+            midleft=(card.x + self.theme.space.sm, card.centery)))
 
         mouse_pos = pygame.mouse.get_pos()
         mono = self.fonts.mono("input")
@@ -1169,20 +1355,46 @@ class UIManager:
         add_rect = self.add_symbol_button_rect
         self._button(add_rect, "+", hovered=add_rect.collidepoint(mouse_pos))
 
-    def _draw_status_info(self, automaton: "fsa.DFA", panel_rect: pygame.Rect):
-        """Draw status information about the current automaton."""
+    def _draw_panel_frame(self, key: str, rect: pygame.Rect) -> Optional[pygame.Rect]:
+        """Draw a right-column panel's card and its header.
+
+        Returns the rectangle left over for the body, or ``None`` when the
+        panel is folded down to its header. The header is always drawn and is
+        always the click target, so a collapsed panel is a labelled notch
+        rather than a thing that has vanished.
+        """
         palette = self.theme.palette
-        primitives.elevated_panel(self.screen, panel_rect, palette.panel,
+        primitives.elevated_panel(self.screen, rect, palette.panel,
                                   radius=self.theme.radius.lg,
                                   border=palette.border, shadow=palette.shadow,
                                   bevel_light=palette.bevel_light,
                                   bevel_dark=palette.bevel_dark)
 
-        info_x = panel_rect.x + self.theme.space.md
-        info_y = panel_rect.y + self.theme.space.md
-        value_x = info_x + 92
+        header = self.layout.panel_header(rect)
+        hovered = header.collidepoint(pygame.mouse.get_pos())
+        title = self.fonts.ui("small_strong").render(
+            PANEL_TITLES.get(key, key).upper(), True,
+            palette.text if hovered else palette.text_faint)
+        self.screen.blit(title, title.get_rect(
+            midleft=(header.x + self.theme.space.md, header.centery)))
 
-        self._section_label("Automaton", (info_x, info_y))
+        self._chevron(pygame.Rect(header.right - 28, header.y + 8, 18, 18),
+                      palette.text if hovered else palette.text_muted,
+                      pointing="right" if self.collapsed.get(key) else "down")
+
+        body = pygame.Rect(rect.x, header.bottom, rect.width,
+                           rect.bottom - header.bottom)
+        return body if body.height > 6 else None
+
+    def _draw_status_info(self, automaton: "fsa.DFA", panel_rect: pygame.Rect):
+        """Draw status information about the current automaton."""
+        palette = self.theme.palette
+        body = self._draw_panel_frame("status", panel_rect)
+        if body is None:
+            return
+
+        info_x = body.x + self.theme.space.md
+        value_x = info_x + 92
 
         rows = [
             ("States", str(len(automaton.states)), False),
@@ -1194,7 +1406,7 @@ class UIManager:
 
         label_font = self.fonts.ui("small")
         value_font = self.fonts.ui("small_strong")
-        row_y = info_y + 20
+        row_y = body.y + 4
         for label, value, warn in rows:
             self.screen.blit(label_font.render(label, True, palette.text_muted),
                              (info_x, row_y))
@@ -1202,7 +1414,7 @@ class UIManager:
             if warn:
                 colour = palette.warning
             surface = value_font.render(value, True, colour)
-            available = panel_rect.right - value_x - self.theme.space.md
+            available = body.right - value_x - self.theme.space.md
             while surface.get_width() > available and len(value) > 4:
                 value = value[:-4] + "..."
                 surface = value_font.render(value, True, colour)
@@ -1214,9 +1426,6 @@ class UIManager:
                 self.fonts.ui("small").render("No string can be accepted", True,
                                               palette.warning),
                 (info_x, row_y))
-            row_y += 18
-
-        self._draw_animation_controls_in_status(info_x, row_y + 8)
 
     def draw_legend(self, automaton: "fsa.DFA") -> None:
         """Explain the state styles, showing only the kinds actually present.
@@ -1247,18 +1456,16 @@ class UIManager:
             return
 
         row_h = 22
-        primitives.elevated_panel(self.screen, rect, palette.panel,
-                                  radius=self.theme.radius.lg,
-                                  border=palette.border, shadow=palette.shadow,
-                                  bevel_light=palette.bevel_light,
-                                  bevel_dark=palette.bevel_dark)
-        self._section_label("Legend", (rect.x + self.theme.space.md,
-                                       rect.y + self.theme.space.md))
+        body = self._draw_panel_frame("legend", rect)
+        if body is None:
+            return
 
         font = self.fonts.ui("small")
-        y = rect.y + 32
+        y = body.y + 3
         for label, fill, ring, style in entries:
-            centre = (rect.x + self.theme.space.md + 9, y + 7)
+            if y + row_h > body.bottom:
+                break
+            centre = (body.x + self.theme.space.md + 9, y + 7)
             primitives.filled_circle(self.screen, centre, 9, fill)
             if style == "hatch":
                 primitives.hatch_circle(self.screen, centre, 8,
@@ -1271,7 +1478,7 @@ class UIManager:
                 primitives.ring(self.screen, centre, 6, 1, ring)
 
             self.screen.blit(font.render(label, True, palette.text_muted),
-                             (rect.x + self.theme.space.md + 26, y))
+                             (body.x + self.theme.space.md + 26, y))
             y += row_h
 
     def _draw_diagnostics(self, rect: pygame.Rect) -> None:
@@ -1284,18 +1491,16 @@ class UIManager:
         from a wrong language, and this panel is where that becomes concrete.
         """
         palette = self.theme.palette
-        primitives.elevated_panel(self.screen, rect, palette.panel,
-                                  radius=self.theme.radius.lg,
-                                  border=palette.border, shadow=palette.shadow,
-                                  bevel_light=palette.bevel_light,
-                                  bevel_dark=palette.bevel_dark)
-        self._section_label("Diagnostics", (rect.x + self.theme.space.md,
-                                            rect.y + self.theme.space.md))
+        body = self._draw_panel_frame("diagnostics", rect)
+        if body is None:
+            return
 
         font = self.fonts.ui("tiny")
-        row_y = rect.y + 34
+        row_y = body.y + 2
         for defect in self.diagnostics[:4]:
-            row = pygame.Rect(rect.x + 6, row_y, rect.width - 12, 36)
+            if row_y + 36 > body.bottom:
+                break
+            row = pygame.Rect(body.x + 6, row_y, body.width - 12, 36)
 
             colour = palette.error if defect.is_blocking else palette.warning
             if defect.kind == "unreachable_states":
@@ -1343,9 +1548,18 @@ class UIManager:
 
             row_y += 40
 
-    def _draw_animation_controls_in_status(self, x: int, y: int):
-        """Playback speed, inside the status panel."""
+    def _draw_playback_controls(self, x: int, y: int):
+        """Playback state and speed, inside the run panel.
+
+        These used to live in the status panel and were drawn whether or not
+        anything was running -- a "Paused" dot and a speed slider for an
+        animation that did not exist, which is most of what made that panel
+        look half empty.
+        """
         palette = self.theme.palette
+        slider = self.speed_slider_rect
+        if slider is None:
+            return
         animating = getattr(self, '_animation_active', False)
 
         dot_colour = palette.success if animating else palette.text_faint
@@ -1363,7 +1577,6 @@ class UIManager:
             (x + 78, y))
 
         # Track, filled portion, then handle, following the slid panel.
-        slider = self.speed_slider_rect
         track = pygame.Rect(slider.x, slider.centery - 2, slider.width, 4)
         primitives.panel(self.screen, track, palette.control, radius=2)
         filled = pygame.Rect(track.x, track.y, int(track.width * speed_ratio), 4)
@@ -1728,25 +1941,22 @@ class UIManager:
             return
 
         palette = self.theme.palette
-        primitives.elevated_panel(self.screen, panel_rect, palette.panel,
-                                  radius=self.theme.radius.lg,
-                                  border=palette.border, shadow=palette.shadow,
-                                  bevel_light=palette.bevel_light,
-                                  bevel_dark=palette.bevel_dark)
+        body = self._draw_panel_frame("run", panel_rect)
+        if body is None:
+            return
 
-        x = panel_rect.x + self.theme.space.md
-        y = panel_rect.y + self.theme.space.md
-        self._section_label("Run", (x, y))
+        x = body.x + self.theme.space.md
+        y = body.y + 2
 
         total_steps = max(0, len(execution_path) - 1)
         position = f"{execution_step} / {total_steps}"
         pos_surface = self.fonts.ui("small_strong").render(position, True,
                                                            palette.text_muted)
-        self.screen.blit(pos_surface, (panel_rect.right - self.theme.space.md
+        self.screen.blit(pos_surface, (body.right - self.theme.space.md
                                        - pos_surface.get_width(), y))
 
         # Progress bar across the run.
-        track = pygame.Rect(x, y + 20, panel_rect.width - self.theme.space.md * 2, 4)
+        track = pygame.Rect(x, y + 20, body.width - self.theme.space.md * 2, 4)
         primitives.panel(self.screen, track, palette.control, radius=2)
         if total_steps:
             done = pygame.Rect(track.x, track.y,
@@ -1775,7 +1985,11 @@ class UIManager:
         hint = "N next   P back   Tab play   Esc stop"
         self.screen.blit(
             self.fonts.ui("small").render(hint, True, palette.text_faint),
-            (x, panel_rect.bottom - 24))
+            (x, y + 74))
+
+        # Below the hint, not on top of it: both were positioned from opposite
+        # ends of the panel and met in the middle.
+        self._draw_playback_controls(x, y + 96)
 
     def _draw_add_symbol_dialog(self):
         """The add-symbol dialog, on the same modal frame as its siblings.

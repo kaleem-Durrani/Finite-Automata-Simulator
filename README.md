@@ -49,6 +49,7 @@ python main.py
 | Left click | Select a state, or drag it |
 | Shift + left click | Start creating a transition (then click the target state) |
 | Right click | Open a context menu for a state, a transition arrow, or the canvas |
+| Space + drag | Pan the view — or switch on the hand tool in the toolbar |
 | Right or middle drag | Pan the view |
 | Scroll wheel | Zoom in/out |
 
@@ -56,12 +57,24 @@ A right *drag* pans and a right *click* opens a menu; the menu waits for the but
 only appears if the pointer never travelled. Panning with the right button matters on a trackpad,
 where there is no middle button to hold.
 
+`Space` is the same story in one key: held it pans, tapped it adds a state. Which one it was is
+only knowable when the key comes up, so the state appears on release.
+
+### Panels
+
+The window opens maximised, with the canvas full-bleed underneath everything else. The symbol
+palette is a small card in the top-left corner and is always visible — what you can draw with
+should never be hidden. Everything else folds away: click any right-hand panel's title to collapse
+it to a labelled notch, and the panels below glide up into the space. The test-string box folds
+down to a pill in the bottom corner and opens on a click, or on its own whenever a run produces a
+verdict.
+
 ### Keyboard
 
 | Key | Effect |
 |---|---|
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo the last edit (`Ctrl+Shift+Z` also redoes) |
-| `Space` | Add a new state at the centre of the view |
+| `Space` | Tapped, add a new state at the centre; held, pan the view |
 | `Delete` | Remove the selected state |
 | `Q` | Toggle the selected state as accepting |
 | `W` | Make the selected state a trap (loop every symbol back to it) |

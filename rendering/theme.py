@@ -156,7 +156,9 @@ DARK = Palette(
     edge=(112, 122, 140),
     edge_muted=(66, 72, 85),
     edge_active=(56, 189, 248),
-    label_plate=(26, 29, 36),
+    # Deliberately several steps off `canvas`: the plate's whole job is to lift
+    # the symbol off the line it sits on. Matching the canvas makes it vanish.
+    label_plate=(40, 45, 56),
     label_text=(198, 206, 220),
 
     token=(125, 211, 252),
@@ -231,7 +233,9 @@ LIGHT = Palette(
     edge=(74, 74, 78),
     edge_muted=(176, 173, 168),
     edge_active=(37, 99, 235),
-    label_plate=(250, 249, 247),
+    # Was exactly `canvas`, which made the plate invisible: the symbol sat
+    # directly on its own transition line with nothing separating them.
+    label_plate=(231, 228, 220),
     label_text=(48, 48, 52),
 
     token=(37, 99, 235),

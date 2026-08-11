@@ -17,6 +17,7 @@ import pytest
 import fsa
 import main as main_module
 import rendering.renderer as renderer_module
+import rendering.theme as theme_module
 import ui.ui_manager as ui_manager_module
 from editor import EditorModel
 from fsa import serialize
@@ -79,7 +80,16 @@ def move(app: AutomatonSimulator, pos, buttons=(1, 0, 0)):
 
 
 def press(app: AutomatonSimulator, code: int, char: str = ""):
+    """A whole keystroke: down, then up.
+
+    Real keys are always released, and space now means "pan" while it is held
+    and "add a state" when it is tapped -- so a key-down with no matching
+    key-up is not a press at all, it is a key stuck down. KEYUP carries no
+    `unicode`; only KEYDOWN does.
+    """
     send(app, pygame.event.Event(pygame.KEYDOWN, key=code, unicode=char,
+                                 mod=pygame.KMOD_NONE, scancode=0))
+    send(app, pygame.event.Event(pygame.KEYUP, key=code,
                                  mod=pygame.KMOD_NONE, scancode=0))
 
 
@@ -625,8 +635,10 @@ def test_ui_panels_are_not_canvas(app):
     # asking whether it covers the canvas.
     pump(app, frames=30)
     assert app.ui_manager.is_over_ui(app.ui_manager.save_button_rect.center)
-    assert app.ui_manager.is_over_ui(app.ui_manager.input_rect.center)
-    assert app.ui_manager.is_over_ui(app.ui_manager.layout.status_panel.center)
+    assert app.ui_manager.is_over_ui(app.ui_manager.input_panel_rect.center)
+    status = next(rect for key, rect, _t in app.ui_manager._column
+                  if key == "status")
+    assert app.ui_manager.is_over_ui(status.center)
     assert not app.ui_manager.is_over_ui(canvas_point(app, 0.5))
 
 
@@ -662,8 +674,15 @@ def test_wheel_still_zooms_when_help_is_closed(app):
 
 
 def test_speed_slider_can_be_dragged_and_is_read(app):
-    """The slider was inert: undraggable, and its value was never read."""
-    slider = app.ui_manager.layout.speed_slider
+    """The slider was inert: undraggable, and its value was never read.
+
+    It lives in the run panel now, because playback controls for an animation
+    that is not playing are exactly the emptiness the status panel was full of.
+    """
+    app._test_string("ab")
+    pump(app, frames=30)
+    slider = app.ui_manager.speed_slider_rect
+    assert slider is not None, "a run is on screen, so the slider exists"
 
     click(app, (slider.x + 2, slider.centery))
     assert app.ui_manager.speed_slider_dragging is True
@@ -1511,6 +1530,192 @@ def test_the_rename_field_stops_at_the_limit(app):
         press(app, ord("x"), "x")
 
     assert len(app.ui_manager.file_prompt_text) == ui_manager_module.RENAME_LABEL_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: the layout rework
+# ---------------------------------------------------------------------------
+
+
+def test_the_symbol_palette_never_overlaps_the_right_column(app):
+    """The reported bug: the palette was a full-width band, so the right-hand
+    panels were painted on top of it. A card cannot collide with them."""
+    app._handle_resize(1400, 860)
+    pump(app, frames=40)
+
+    card = app.ui_manager.symbol_card_rect
+    assert app.ui_manager._column, "the column is on screen"
+    for key, rect, _t in app.ui_manager._column:
+        assert not card.colliderect(rect), f"palette overlaps {key}"
+
+
+def test_the_palette_card_grows_with_the_alphabet_but_stays_compact(app):
+    """It is only as wide as the alphabet it holds, and far shorter than the
+    70px band it replaces."""
+    narrow = app.ui_manager.symbol_card_rect
+    assert narrow.height < 70
+    assert narrow.width < app.screen.get_width() // 3
+
+    for symbol in "cdefg":
+        app.editor.add_symbol(symbol)
+    app.ui_manager.sync_symbols_with(app.editor.automaton)
+    assert app.ui_manager.symbol_card_rect.width > narrow.width
+
+
+def test_every_symbol_chip_sits_inside_the_card(app):
+    for symbol in "cdefghijklmnop":
+        app.editor.add_symbol(symbol)
+    app.ui_manager.sync_symbols_with(app.editor.automaton)
+
+    card = app.ui_manager.symbol_card_rect
+    chips = list(app.ui_manager.symbol_buttons.values())
+    chips.append(app.ui_manager.add_symbol_button_rect)
+    for chip in chips:
+        assert card.contains(chip), "a chip escaped its card"
+
+
+def test_a_panel_header_folds_and_reopens_it(app):
+    """The notch: collapsed, the panel is its own title, and clicking that
+    title brings it back."""
+    pump(app, frames=40)
+    manager = app.ui_manager
+    status = next(r for key, r, _t in manager._column if key == "status")
+    full_height = status.height
+
+    click(app, manager.layout.panel_header(status).center)
+    pump(app, frames=40)
+    assert manager.collapsed["status"] is True
+    folded = next(r for key, r, _t in manager._column if key == "status")
+    assert folded.height < full_height
+    assert folded.height == ui_manager_module.PANEL_HEADER_HEIGHT
+
+    click(app, manager.layout.panel_header(folded).center)
+    pump(app, frames=40)
+    assert manager.collapsed["status"] is False
+    assert next(r for key, r, _t in manager._column
+                if key == "status").height == full_height
+
+
+def test_a_collapsed_panel_still_says_what_it_is():
+    """A notch nobody can read is just a missing panel."""
+    for key in ("status", "diagnostics", "legend", "run"):
+        assert ui_manager_module.PANEL_TITLES[key].strip()
+
+
+def test_folding_a_panel_lifts_the_ones_below_it(app):
+    pump(app, frames=40)
+    manager = app.ui_manager
+    before = next(r for key, r, _t in manager._column if key == "legend").y
+
+    manager.toggle_panel("status")
+    pump(app, frames=40)
+    assert next(r for key, r, _t in manager._column if key == "legend").y < before
+
+
+def test_the_test_box_starts_folded_and_opens_on_a_click(app):
+    """It was 600x118 of permanently reserved canvas for one text field."""
+    manager = app.ui_manager
+    assert not manager.input_expanded
+    folded = manager.input_panel_rect
+    assert folded.height < 40
+
+    click(app, folded.center)
+    assert manager.input_expanded and manager.input_active
+    assert manager.input_panel_rect.height > folded.height
+
+    click(app, manager.input_collapse_rect.center)
+    assert not manager.input_expanded
+    assert not manager.input_active
+
+
+def test_a_verdict_opens_the_test_box_on_its_own(app):
+    """A verdict the user cannot see is not a verdict."""
+    app.ui_manager.input_expanded = False
+    app._test_string("ab")
+    assert app.ui_manager.input_expanded
+
+
+def test_the_playback_controls_exist_only_during_a_run(app):
+    """A speed slider for an animation that is not playing is exactly the
+    emptiness the status panel was full of."""
+    pump(app, frames=40)
+    assert app.ui_manager.speed_slider_rect is None
+
+    app._test_string("ab")
+    pump(app, frames=40)
+    assert app.ui_manager.speed_slider_rect is not None
+
+
+def test_right_column_panels_never_overlap_each_other(app):
+    app._handle_resize(1400, 860)
+    app._test_string("ab")
+    pump(app, frames=40)
+
+    rects = [rect for _key, rect, _t in app.ui_manager._column]
+    for i, a in enumerate(rects):
+        for b in rects[i + 1:]:
+            assert not a.colliderect(b)
+
+
+def test_space_tapped_adds_a_state_and_held_pans(app):
+    """Space had to become the pan modifier without losing its old job, so
+    which one it was is decided on release."""
+    before = len(app.editor.automaton.states)
+    press(app, pygame.K_SPACE, " ")
+    assert len(app.editor.automaton.states) == before + 1
+
+    # Held, dragged, released: a pan, and no new state.
+    after = len(app.editor.automaton.states)
+    offset = (app.renderer.camera.offset_x, app.renderer.camera.offset_y)
+    send(app, pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE, unicode=" ",
+                                 mod=pygame.KMOD_NONE, scancode=0))
+    start = canvas_point(app, 0.5)
+    send(app, pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=start))
+    move(app, (start[0] + 90, start[1] + 50))
+    release(app, (start[0] + 90, start[1] + 50))
+    send(app, pygame.event.Event(pygame.KEYUP, key=pygame.K_SPACE,
+                                 mod=pygame.KMOD_NONE, scancode=0))
+
+    assert (app.renderer.camera.offset_x, app.renderer.camera.offset_y) != offset
+    assert len(app.editor.automaton.states) == after, "a pan is not an add"
+
+
+def test_a_space_typed_into_the_test_field_adds_no_state(app):
+    """The UI consumes the key-down but the key-up still arrives, which would
+    otherwise mint a state every time someone typed a space."""
+    app.ui_manager.input_expanded = True
+    app.ui_manager.input_active = True
+    before = len(app.editor.automaton.states)
+
+    press(app, pygame.K_SPACE, " ")
+    assert len(app.editor.automaton.states) == before
+
+
+def test_the_hand_tool_pans_without_touching_the_automaton(app):
+    manager = app.ui_manager
+    click(app, manager.pan_button_rect.center)
+    assert manager.pan_tool is True
+
+    before = app.editor.document
+    offset = (app.renderer.camera.offset_x, app.renderer.camera.offset_y)
+    start = screen_of(app, "q0")
+    send(app, pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=start))
+    move(app, (start[0] + 70, start[1] + 40))
+    release(app, (start[0] + 70, start[1] + 40))
+
+    assert (app.renderer.camera.offset_x, app.renderer.camera.offset_y) != offset
+    assert app.editor.document == before, "the hand tool moves the view, not states"
+    assert app.editor.selection is None
+
+
+def test_edge_label_plates_are_visible_against_the_canvas():
+    """In light mode the plate was exactly the canvas colour, so the symbol sat
+    directly on its own transition line with nothing separating them."""
+    for name in ("dark", "light"):
+        palette = theme_module.Theme(name).palette
+        difference = sum(abs(a - b) for a, b in
+                         zip(palette.label_plate, palette.canvas))
+        assert difference > 20, f"{name}: plate blends into the canvas"
 
 
 def test_elide_shortens_only_what_does_not_fit(app):

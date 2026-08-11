@@ -51,6 +51,23 @@ from ui.ui_manager import UIManager
 STARTING_ALPHABET = ("a", "b")
 
 
+def _maximize_window() -> None:
+    """Open filling the screen.
+
+    Maximised rather than exclusive fullscreen: the title bar and the taskbar
+    stay where the user expects them, which is what "opens big" should mean for
+    a desktop tool rather than a game. Does nothing where the platform has no
+    such concept -- the dummy video driver the tests run under, for one -- so a
+    failure here must never stop the application from starting.
+    """
+    try:
+        from pygame._sdl2 import video
+        video.Window.from_display_module().maximize()
+        pygame.event.pump()
+    except Exception:
+        pass
+
+
 def demo_document() -> Document:
     """The automaton the application opens with: a*b+."""
     document = Document()
@@ -83,6 +100,12 @@ class AutomatonSimulator:
             (int(info.current_w * 0.75), int(info.current_h * 0.75)),
             pygame.RESIZABLE,
         )
+        _maximize_window()
+        # Adopt the maximised size now rather than waiting for the resize event,
+        # so the first frame is already laid out for the window the user sees.
+        surface = pygame.display.get_surface()
+        if surface is not None:
+            self.screen = surface
 
         # Theme and fonts are shared, so switching palettes reaches every
         # surface at once.
@@ -131,6 +154,10 @@ class AutomatonSimulator:
 
         self.panning = False
         self.pan_start = (0, 0)
+        # Space is a pan modifier while held and "add a state" when tapped;
+        # _space_panned records which it turned out to be.
+        self._space_held = False
+        self._space_panned = False
         self._right_press: Optional[Tuple[int, int]] = None
         self._right_dragged = False
 
@@ -186,6 +213,8 @@ class AutomatonSimulator:
                 self._handle_mouse_wheel(event)
             elif event.type == pygame.KEYDOWN:
                 self._handle_key_down(event)
+            elif event.type == pygame.KEYUP:
+                self._handle_key_up(event)
 
     def _handle_resize(self, width: int, height: int) -> None:
         self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
@@ -208,8 +237,21 @@ class AutomatonSimulator:
         """
         return bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
 
+    def _pan_modifier_held(self) -> bool:
+        """Whether a left-drag should pan instead of reaching the canvas."""
+        return self._space_held or self.ui_manager.pan_tool
+
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         if event.button == 1:
+            if self._pan_modifier_held():
+                # Space, or the hand tool, turns the left button into a pan --
+                # the gesture every drawing program uses. Checked before the
+                # click reaches the canvas, so panning never also selects a
+                # state or starts dragging one.
+                self.panning = True
+                self.pan_start = event.pos
+                self._space_panned = True
+                return
             self._handle_left_click(event.pos, self._shift_held())
         elif event.button == 2:
             self.panning = True
@@ -223,6 +265,7 @@ class AutomatonSimulator:
 
     def _handle_mouse_up(self, event: pygame.event.Event) -> None:
         if event.button == 1:
+            self.panning = False
             if self.editor.end_drag():
                 self._update_caption()
         elif event.button == 2:
@@ -356,6 +399,20 @@ class AutomatonSimulator:
     # Keyboard
     # ------------------------------------------------------------------
 
+    def _handle_key_up(self, event: pygame.event.Event) -> None:
+        """Finish a space-bar gesture.
+
+        Guarded on the key actually having been pressed on the canvas: if the
+        UI consumed the key-down -- a space typed into the test field -- the
+        matching key-up still arrives here, and adding a state for it would be
+        a state appearing every time someone typed a space.
+        """
+        if event.key == pygame.K_SPACE and self._space_held:
+            self._space_held = False
+            if not self._space_panned:
+                self._add_state_at_center()
+            self._space_panned = False
+
     def _handle_key_down(self, event: pygame.event.Event) -> None:
         """Handle key down events the UI did not consume."""
         # Chords first: a plain 'z' must not undo, and Ctrl+Z must not fall
@@ -370,7 +427,11 @@ class AutomatonSimulator:
             return
 
         if event.key == pygame.K_SPACE:
-            self._add_state_at_center()
+            # Held, space pans; tapped, it adds a state. Which of the two it
+            # was is only known once the key comes up, so the add waits for
+            # the release rather than firing here and being wrong half the
+            # time.
+            self._space_held = True
         elif event.key == pygame.K_DELETE:
             self._delete_selected_state()
         elif event.key == pygame.K_q:
@@ -779,6 +840,9 @@ class AutomatonSimulator:
 
         self.ui_manager.test_result = result.explain()
         self.ui_manager.test_verdict = result.verdict.value
+        # A verdict the user cannot see is not a verdict. Running a string is
+        # the one thing that opens the test panel on its own.
+        self.ui_manager.input_expanded = True
 
         self.execution_active = True
         self.execution_string = test_string
