@@ -87,6 +87,15 @@ first, then clamp, then draw.*
 
 ## Design
 
+**A plan item can outlive the design it was written for.**
+Phase 8 called for `screen.set_clip(regions.canvas)` around the world passes,
+which made sense when opaque panels bounded a canvas *region*. The interface
+later became a full-bleed canvas with panels floating over it, so the "region"
+is now the whole window under the toolbar, the chrome is painted afterwards
+anyway, and the change measured 18.03ms against 18.04ms per frame on a
+forty-state machine. *Re-derive whether an item is still true before
+implementing it; a checklist is evidence about the past.*
+
 **Correct is not the same as useful.**
 With no accepting state, every state is genuinely a trap — so the whole canvas
 greyed out while the user was still drawing. The maths was right and the display
@@ -129,5 +138,9 @@ byte where the two-character escape was meant. Python ends a line at a bare CR,
 so the string never closed and the *whole* suite stopped collecting — 503 tests
 reported as one collection error. The same two bytes made the file mixed-ending,
 so git gave up normalising it and rendered a 2,500-line rewrite that buried the
-162 lines actually added. One cause, two symptoms that look unrelated. *When a
-diff is inexplicably whole-file, read the bytes before reading the content.*
+162 lines actually added. One cause, two symptoms that look unrelated. It then
+happened twice more, from edit scripts that assumed one ending and wrote the
+other into a file already using the opposite. *When a diff is inexplicably
+whole-file, read the bytes before reading the content* — and a `.gitattributes`
+with `text=auto` now settles the repository's answer so no clone's
+`core.autocrlf` gets a vote.

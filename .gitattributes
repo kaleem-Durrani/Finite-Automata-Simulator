@@ -1,0 +1,34 @@
+# Line endings are decided here, not by whatever core.autocrlf each clone
+# happens to have set.
+#
+# Mixed endings *inside one file* have cost this project real time three times.
+# Once a stray CR sat inside a string literal, which Python reads as the end of
+# the line, so the literal never closed and the entire suite stopped collecting
+# -- 503 tests reported as one collection error. The same two bytes made the
+# file mixed-ending, so git gave up normalising it and rendered a 2,500-line
+# rewrite over the 162 lines actually added. Twice since, an edit left a file
+# half-CRLF and the same whole-file diff appeared.
+#
+# `text=auto` makes git normalise to LF in the repository and check out in the
+# platform's own convention, which is what has been happening by accident and
+# is now written down.
+* text=auto
+
+# The text this project actually edits. Named explicitly so a file with an
+# unusual byte early on is never guessed to be binary.
+*.py    text
+*.md    text
+*.toml  text
+*.json  text
+*.txt   text
+*.cfg   text
+*.yml   text
+*.yaml  text
+
+# Binary, so git never translates anything inside them.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
