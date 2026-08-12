@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pygame
 
 import fsa
+from rendering import primitives
 from rendering.animation import Animated, Timer, ease_out
 from rendering.fonts import FontBook
 from rendering.theme import Theme
@@ -40,6 +41,9 @@ from ui.panels import (
     tape_strip,
     test_panel,
     toolbar,
+)
+from ui.panels import (
+    marking_table as marking_table_panel,
 )
 from ui.panels.help_panel import HELP_LINES  # noqa: E402
 from ui.widgets import Chrome
@@ -146,6 +150,16 @@ class UIManager:
         # never costs the user the knowledge that it exists. Each panel also
         # eases between the two heights rather than snapping.
 
+
+        # The marking table overlay: the table itself, how much of it has been
+        # revealed so far, and which cell the user asked about. `revealed`
+        # counts rounds and is eased, so the grid fills the way the algorithm
+        # does -- one round at a time -- rather than appearing all at once.
+        self.marking_table: Optional[Any] = None
+        self.marking_reveal = Animated(duration=0, easing=ease_out)
+        self.marking_selected: Optional[Tuple[str, str]] = None
+        self._marking_cells: Dict[Tuple[str, str], pygame.Rect] = {}
+        self._marking_close: Optional[pygame.Rect] = None
 
         # The test panel folds down to a labelled pill. It is the least often
         # needed thing on screen and it was the largest, so it starts folded
@@ -304,6 +318,29 @@ class UIManager:
 
     def hide_context_menu(self) -> None:
         self.context_menu = None
+
+    def show_marking_table(self, table: Any) -> None:
+        """Open the grid and start filling it, one round at a time.
+
+        The reveal is animated because the order is the lesson: round 0 splits
+        accepting from non-accepting, and every later round is separated only
+        by a symbol leading to a pair already split. Showing the finished table
+        at once loses the reason each cell has the number it has.
+        """
+        self.marking_table = table
+        self.marking_selected = None
+        self.marking_reveal.jump_to(0.0)
+        # One round takes about as long as a playback step, so a reader can
+        # follow it without the whole grid being a flash.
+        rounds = max(1, getattr(table, "rounds", 1))
+        self.marking_reveal.set(float(rounds),
+                                duration=self.theme.motion.step * rounds)
+
+    def hide_marking_table(self) -> None:
+        self.marking_table = None
+        self.marking_selected = None
+        self._marking_cells = {}
+        self._marking_close = None
 
     def draw_legend(self, automaton: "fsa.DFA") -> None:
         """Explain the state styles, showing only the kinds actually present."""
@@ -606,6 +643,10 @@ class UIManager:
         if self.adding_symbol:
             return self._handle_symbol_dialog_click(pos), True
 
+        # The marking table covers the canvas while it is open.
+        if self.marking_table is not None:
+            return self._handle_marking_click(pos), True
+
         # The context menu is above every other widget, and any click while it
         # is open belongs to it -- either choosing an item or dismissing it.
         if self.context_menu and self.context_menu.visible:
@@ -675,6 +716,20 @@ class UIManager:
                 self.hide_file_prompt()
         return []
 
+    def _handle_marking_click(self, pos) -> Events:
+        """Close the grid, or ask a cell why it holds the number it does."""
+        if self._marking_close is not None and self._marking_close.collidepoint(pos):
+            self.hide_marking_table()
+            return []
+
+        for pair, rect in self._marking_cells.items():
+            if rect.collidepoint(pos):
+                # Clicking the selected cell again puts the sentence away.
+                self.marking_selected = (
+                    None if self.marking_selected == pair else pair)
+                return []
+        return []
+
     def _handle_symbol_dialog_click(self, pos) -> Events:
         """Handle the add-symbol dialog's own buttons."""
         cancel, add = dialogs.symbol_dialog_buttons(self.screen_width,
@@ -722,6 +777,9 @@ class UIManager:
             or self.adding_symbol
             or self.file_prompt_mode
             or self.confirm_intent
+            # The marking table owns Escape while it is open, and no editor
+            # shortcut should reach the canvas behind it.
+            or self.marking_table is not None
         )
 
     def is_modal_active(self) -> bool:
@@ -822,6 +880,11 @@ class UIManager:
         """Handle key down events."""
         # Dialogs are modal, and they are checked before anything else so that
         # keys reach the topmost one only.
+        if self.marking_table is not None:
+            if event.key == pygame.K_ESCAPE:
+                self.hide_marking_table()
+            return []
+
         if self.confirm_intent:
             return self._handle_confirm_key(event)
 
@@ -884,6 +947,7 @@ class UIManager:
         # Panel slides, folds and tape motion close toward their targets every
         # frame.
         self.column_state.advance(dt)
+        self.marking_reveal.update(dt)
         self.strip_scroll.update(dt)
         self.strip_pop.update(dt)
 
@@ -971,6 +1035,19 @@ class UIManager:
         """
         chrome = self.chrome
         mouse_pos = pygame.mouse.get_pos()
+
+        if self.marking_table is not None:
+            # Over the canvas but under the modal dialogs, which can still be
+            # opened from the toolbar while it is up.
+            primitives.dim(self.screen,
+                           (0, 0, 0, 150 if self.theme.palette.is_dark else 90))
+            hits = marking_table_panel.draw(
+                chrome, table=self.marking_table,
+                panel=self.layout.marking_panel(),
+                revealed=self.marking_reveal.value,
+                selected=self.marking_selected, mouse_pos=mouse_pos)
+            self._marking_cells = dict(hits.cells)
+            self._marking_close = hits.close
 
         if self.show_help:
             help_panel.draw(chrome, layout=self.layout,

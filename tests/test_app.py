@@ -2170,3 +2170,122 @@ def test_the_diagnostics_panel_is_tall_enough_for_its_text(app):
         app.ui_manager.chrome, app.ui_manager.diagnostics,
         layout_spec.PANEL_WIDTH)
     assert rect.height >= needed
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: the marking table, the artifact Moore was chosen to show
+# ---------------------------------------------------------------------------
+
+
+def mergeable_document() -> fsa.Document:
+    """q2 and q3 are indistinguishable, so the table has empty cells to show."""
+    document = fsa.Document()
+    for symbol in "ab":
+        document = document.add_symbol(symbol)
+    for _ in range(6):
+        document, _ = document.add_state((0.0, 0.0))
+    automaton = document.automaton.with_initial("q0")
+    for state in ("q2", "q3", "q4"):
+        automaton = automaton.with_accept(state)
+    for source, symbol, target in [
+        ("q0", "a", "q1"), ("q0", "b", "q2"),
+        ("q1", "a", "q0"), ("q1", "b", "q3"),
+        ("q2", "a", "q4"), ("q2", "b", "q5"),
+        ("q3", "a", "q4"), ("q3", "b", "q5"),
+        ("q4", "a", "q4"), ("q4", "b", "q5"),
+        ("q5", "a", "q5"), ("q5", "b", "q5"),
+    ]:
+        automaton = automaton.with_transition(source, symbol, target)
+    return fsa.Document(automaton, fsa.Layout.auto(automaton), 6)
+
+
+def test_the_marking_table_opens_from_the_canvas_menu(app):
+    app.editor.replace(mergeable_document(), None)
+    app.ui_manager.sync_symbols_with(app.editor.automaton)
+
+    click(app, canvas_point(app, 0.5), button=3)
+    click(app, menu_row(app, "Marking table"))
+    pump(app, frames=2)
+
+    table = app.ui_manager.marking_table
+    assert table is not None
+    assert table.equivalent_pairs, "this machine has a pair that merges"
+
+
+def test_the_table_fills_one_round_at_a_time(app):
+    """The order is the lesson: round 0 splits accepting from non-accepting,
+    and every later round is separated only by a symbol into an earlier one."""
+    app.editor.replace(mergeable_document(), None)
+    app._show_marking_table()
+
+    assert app.ui_manager.marking_reveal.value == 0.0
+    pump(app, frames=2)
+    partway = app.ui_manager.marking_reveal.value
+    assert 0.0 <= partway < app.ui_manager.marking_table.rounds
+
+    pump(app, frames=200)
+    assert app.ui_manager.marking_reveal.value == pytest.approx(
+        float(app.ui_manager.marking_table.rounds))
+
+
+def test_every_pair_gets_exactly_one_cell(app):
+    app.editor.replace(mergeable_document(), None)
+    app._show_marking_table()
+    pump(app, frames=200)
+
+    table = app.ui_manager.marking_table
+    assert len(app.ui_manager._marking_cells) == len(table.pairs)
+    assert set(app.ui_manager._marking_cells) == set(table.pairs)
+
+
+def test_clicking_a_cell_asks_why_and_clicking_again_stops_asking(app):
+    app.editor.replace(mergeable_document(), None)
+    app._show_marking_table()
+    pump(app, frames=200)
+
+    pair, rect = next(iter(app.ui_manager._marking_cells.items()))
+    click(app, rect.center)
+    assert app.ui_manager.marking_selected == pair
+    click(app, rect.center)
+    assert app.ui_manager.marking_selected is None
+
+
+def test_escape_and_the_close_button_both_shut_the_table(app):
+    app.editor.replace(mergeable_document(), None)
+    app._show_marking_table()
+    pump(app, frames=200)
+
+    press(app, pygame.K_ESCAPE)
+    assert app.ui_manager.marking_table is None
+
+    app._show_marking_table()
+    pump(app, frames=200)
+    close = app.ui_manager._marking_close
+    assert close is not None
+    click(app, close.center)
+    assert app.ui_manager.marking_table is None
+
+
+def test_the_table_holds_the_canvas_while_it_is_open(app):
+    """It covers the diagram, so a click must not also land on a state."""
+    app.editor.replace(mergeable_document(), None)
+    before = app.editor.selection
+    app._show_marking_table()
+    pump(app, frames=200)
+
+    click(app, canvas_point(app, 0.5))
+    assert app.editor.selection == before
+    assert app.ui_manager.is_keyboard_captured()
+
+
+def test_a_machine_with_one_state_has_no_pairs_to_show(app):
+    document = fsa.Document()
+    document = document.add_symbol("a")
+    document, _ = document.add_state((0.0, 0.0))
+    app.editor.replace(
+        fsa.Document(document.automaton.with_initial("q0"),
+                     document.layout, 1), None)
+
+    app._show_marking_table()
+    assert app.ui_manager.marking_table is None
+    assert "two states" in app.message_text.lower()

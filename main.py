@@ -500,6 +500,7 @@ class AutomatonSimulator:
             events.ToggleTheme: lambda _e: self._toggle_theme(),
             events.CompleteAutomaton: lambda _e: self._complete_automaton(),
             events.MinimizeAutomaton: lambda _e: self._minimize_automaton(),
+            events.ShowMarkingTable: lambda _e: self._show_marking_table(),
             events.TrimAutomaton: lambda _e: self._trim_automaton(),
             events.FocusStates: lambda e: self._focus_states(list(e.states)),
             events.ShowMessage: lambda e: self._show_message(e.text),
@@ -744,6 +745,28 @@ class AutomatonSimulator:
         self._show_message(
             f"Minimised {before} states to {len(reduced.states)}")
 
+    def _show_marking_table(self) -> None:
+        """Open the table-filling grid for the machine on the canvas.
+
+        The table is computed from the automaton as it stands, not from the
+        last minimisation: the interesting question is which of *these* states
+        are indistinguishable, and the answer has to follow the drawing.
+        """
+        automaton = self.editor.automaton
+        if automaton.initial is None:
+            self._show_message("The marking table needs an initial state")
+            return
+        if len(automaton.states) < 2:
+            self._show_message("Two states are needed to have a pair")
+            return
+
+        table = fsa.marking_table(automaton)
+        self.ui_manager.show_marking_table(table)
+        equivalent = len(table.equivalent_pairs)
+        self._show_message(
+            f"{len(table.marks)} pairs separated, {equivalent} equivalent"
+            if equivalent else "Every pair is distinguishable: already minimal")
+
     def _trim_automaton(self) -> None:
         """Drop the states that cannot appear on an accepting run."""
         automaton = self.editor.automaton
@@ -841,6 +864,7 @@ class AutomatonSimulator:
             MenuItem("Add state here", events.AddStateAt(self._world(pos))),
             MenuItem(SEPARATOR),
             MenuItem("Minimise", events.MinimizeAutomaton()),
+            MenuItem("Marking table", events.ShowMarkingTable()),
             MenuItem("Trim", events.TrimAutomaton()),
             MenuItem(SEPARATOR),
             MenuItem("Fit to content", events.FitView()),

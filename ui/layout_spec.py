@@ -89,6 +89,11 @@ INPUT_ROW_HEIGHT = 56
 INPUT_VERDICT_HEIGHT = 46
 INPUT_COLLAPSED_SIZE = (150, 34)
 
+# The marking table overlay. Generous, because a twenty-state machine is a
+# nineteen-row triangle and the point of the panel is that it can be read.
+MARKING_PANEL_SIZE = (900, 720)
+MARKING_PANEL_MARGIN = 40
+
 # Help panel (centred)
 HELP_PANEL_SIZE = (420, 500)
 HELP_TITLE_HEIGHT = 50
@@ -241,6 +246,20 @@ class LayoutSpec:
     # ------------------------------------------------------------------
     # Help
     # ------------------------------------------------------------------
+
+    def marking_panel(self) -> pygame.Rect:
+        """The centred overlay the marking table is drawn in.
+
+        Sized to the window rather than to the table: the panel decides how big
+        a cell can be, so a bigger window shows a bigger grid rather than the
+        same grid with more whitespace around it.
+        """
+        width = min(MARKING_PANEL_SIZE[0], self.width - MARKING_PANEL_MARGIN * 2)
+        height = min(MARKING_PANEL_SIZE[1],
+                     self.height - TOOLBAR_HEIGHT - MARKING_PANEL_MARGIN * 2)
+        return pygame.Rect((self.width - width) // 2,
+                           TOOLBAR_HEIGHT + (self.height - TOOLBAR_HEIGHT - height) // 2,
+                           width, height)
 
     def help_visible_lines(self) -> int:
         """How many help lines fit in the panel at once."""

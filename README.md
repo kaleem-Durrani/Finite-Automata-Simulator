@@ -106,7 +106,19 @@ mouse but never typed at — pressing `q` toggled accepting instead of choosing 
 
 Right-click a state to toggle whether it accepts, make it the initial state, rename it, turn it
 into a trap, or delete it. The toggles show what the state already is. Right-click empty canvas to
-add a state there, minimise or trim the machine, or fit the view.
+add a state there, minimise or trim the machine, open the marking table, or fit the view.
+
+### The marking table
+
+Minimisation uses Moore's table-filling algorithm rather than Hopcroft's, deliberately: Hopcroft
+is the better algorithm and the worse lesson. The table is the lesson, so you can watch it being
+filled. It fills one round at a time — round 0 separates accepting states from non-accepting ones,
+and a pair marked in round *n* is separated by a symbol leading to a pair already marked in round
+*n−1*. That round number is also the length of the shortest word telling the two states apart.
+
+Cells still empty when the last round has passed are the pairs no word separates: those states
+merge. Click any cell to read, in a sentence you can check by hand, why it holds the number it
+does.
 
 Right-click a transition arrow to remove any one of the symbols travelling along it, or to
 straighten a curved edge. A rename sets a *display label* only: the state keeps its id, so

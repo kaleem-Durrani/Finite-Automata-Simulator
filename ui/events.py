@@ -202,6 +202,13 @@ class TrimAutomaton(UiEvent):
     """Drop every state that cannot appear on an accepting run."""
 
 
+@dataclass(frozen=True)
+class ShowMarkingTable(UiEvent):
+    """Open the table-filling grid: which pairs are distinguishable, and when.
+
+    The artifact Moore was chosen over Hopcroft to be able to show."""
+
+
 # ----------------------------------------------------------------------
 # Camera and messages
 # ----------------------------------------------------------------------
