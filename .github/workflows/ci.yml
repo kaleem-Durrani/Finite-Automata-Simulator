@@ -81,7 +81,12 @@ jobs:
         run: |
           python - <<'PY'
           import ast, pathlib, sys
-          banned = {"pygame", "networkx", "numpy", "automata", "frozendict"}
+          # The oracle libraries are test tools. If one ever reached the
+          # engine, our algorithms would be checked against themselves
+          # wearing a different hat, and the differential suite would be
+          # asserting nothing at all.
+          banned = {"pygame", "networkx", "numpy", "automata", "frozendict",
+                    "hypothesis", "greenery", "pydot", "graphviz"}
           bad = []
           for path in pathlib.Path("src/fsa").rglob("*.py"):
               tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -106,7 +111,7 @@ jobs:
         run: |
           cd src && python -c "
           import sys
-          for blocked in ('pygame', 'networkx', 'numpy'):
+          for blocked in ('pygame', 'networkx', 'numpy', 'hypothesis', 'automata'):
               sys.modules[blocked] = None
           import fsa
           print(f'fsa imports clean, {len(fsa.__all__)} public names')

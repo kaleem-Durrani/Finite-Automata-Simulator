@@ -22,7 +22,19 @@ dependencies = []
 
 [project.optional-dependencies]
 gui = ["pygame>=2.6,<3"]
-dev = ["ruff>=0.16", "mypy>=1.11", "pytest>=8.0"]
+# hypothesis generates the engine's test data and shrinks failures to the
+# smallest machine that reproduces them. automata-lib is a differential
+# oracle: we implement the algorithms and check our answers against an
+# independent implementation. Neither may be imported by src/fsa -- CI
+# fails the build if one is.
+dev = [
+    "ruff>=0.16",
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "automata-lib>=9",
+    "pytest-benchmark>=5",
+]
 
 [project.scripts]
 fsa = "fsa.cli:run_main"

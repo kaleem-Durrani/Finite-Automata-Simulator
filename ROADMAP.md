@@ -189,10 +189,20 @@ back. You have `counterexample()`. What is missing is the *task*.
 
 ---
 
-### Phase 15 — Layout and editing affordances · 9h
+### Phase 15 — Layout, rendering performance, and editing affordances · 13h
 
 The tool currently fights anyone editing a machine of more than six states.
 
+- **Tessellation must follow *screen* length, not world length.**
+  `geometry.segments()` picks `int(length / 9)` from the world length, so a
+  hundred-state machine fitted to the screen still builds every edge from
+  40--72 anti-aliased quads while each is a few pixels long. Phase 8 warned
+  about exactly this and its exit criterion (100 states under 8ms) was never
+  measured; the Phase 11 benchmark measures it at **~97ms a frame, twelve
+  times over**. The fix is to pass a scale into the path builders. It is not
+  a one-liner: `_edge_paths` feeds both the renderer *and* `nearest_edge`,
+  so hit-testing precision changes with it -- arguably correctly, since a
+  click happens in screen space, but it needs its own tests.
 - **Graphviz layout, optional.** `Layout.auto` places by BFS layers, which is
   honest but plain. `dot` produces genuinely better layered drawings. Via
   **`pydot`**, behind a capability check, falling back to BFS layers when the
@@ -210,7 +220,9 @@ The tool currently fights anyone editing a machine of more than six states.
   between states, Enter to start an edge.
 
 **Exit criteria**
-1. Layout falls back cleanly with no `dot` on PATH, and a test forces that path.
+1. The 100-state frame benchmark passes at under 8ms, and its `xfail` mark
+   is removed rather than loosened.
+2. Layout falls back cleanly with no `dot` on PATH, and a test forces that path.
 2. Event replay for tidy-up, box-select, copy/paste and duplicate.
 3. A complete three-state machine can be built without touching the mouse.
 4. Recent files survive a restart and drop entries whose file has gone.
