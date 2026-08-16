@@ -18,11 +18,13 @@ no display and no graphics stack.
 import argparse
 import os
 import sys
-from typing import List, Optional, Sequence, TextIO
+from typing import FrozenSet, List, Optional, Sequence, TextIO, Tuple
 
 import fsa
 from fsa import analysis, language, serialize
 from fsa.export import FORMATS, render
+from fsa.nfa import EPSILON
+from fsa.symbols import StateId, Symbol
 
 OK = 0
 NO = 1
@@ -30,10 +32,40 @@ USAGE = 2
 
 PROGRAM = "fsa"
 
+#: How the empty word and an epsilon move are written for a person. A file
+#: spells the move as JSON ``null`` and the engine spells it ``None``; neither
+#: is a thing to print in a table.
+EPSILON_SHOWN = "ε"
+
+#: The spelling for a terminal that cannot encode the character. Not a
+#: decoration -- see :func:`_epsilon_for`.
+EPSILON_ASCII = "eps"
+
 
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+def _epsilon_for(stream: TextIO) -> str:
+    """``ε``, or an ASCII spelling where ``stream`` cannot encode it.
+
+    A Windows console still defaults to a code page with no Greek in it, so
+    printing the character raises ``UnicodeEncodeError`` partway through the
+    output -- which is how ``fsa sample`` came to abort with a traceback on any
+    machine that accepts the empty word. The question is asked of the stream
+    rather than of the platform, so a redirected file, a pipe or a UTF-8
+    terminal still gets the real character, and only the one that genuinely
+    cannot print it gets the fallback.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return EPSILON_SHOWN
+    try:
+        EPSILON_SHOWN.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return EPSILON_ASCII
+    return EPSILON_SHOWN
+
 
 def _load(path: str, err: TextIO) -> Optional[fsa.Document]:
     document, error = serialize.load_or_error(path)
@@ -42,7 +74,30 @@ def _load(path: str, err: TextIO) -> Optional[fsa.Document]:
     return document
 
 
-def _describe(automaton: fsa.DFA) -> str:
+def _load_dfa(path: str, err: TextIO) -> Optional[Tuple[fsa.Document, fsa.DFA]]:
+    """A document and its deterministic view, or ``None`` with the reason
+    already printed.
+
+    Most verbs here run a DFA algorithm -- minimisation, completion,
+    equivalence, the exporters, the simulator -- and none of them is defined on
+    a machine that has a choice to make. This is the single door they all go
+    through, so "this file is nondeterministic" is reported once, in one
+    wording, naming the state and symbol responsible *and* the command that
+    fixes it. A caller who only wanted the document uses :func:`_load`.
+    """
+    document = _load(path, err)
+    if document is None:
+        return None
+    try:
+        return document, document.as_dfa()
+    except fsa.NondeterministicError as exc:
+        print(f"{PROGRAM}: {path}: {exc}", file=err)
+        print(f"{PROGRAM}: '{PROGRAM} determinize {path}' builds an equivalent "
+              f"deterministic machine", file=err)
+        return None
+
+
+def _describe(automaton: fsa.NFA) -> str:
     return (f"{len(automaton.states)} states, "
             f"alphabet {{{', '.join(sorted(automaton.alphabet)) or 'empty'}}}, "
             f"{len(automaton.accept)} accepting")
@@ -54,11 +109,12 @@ def _describe(automaton: fsa.DFA) -> str:
 
 def cmd_test(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Run one word and report the verdict."""
-    document = _load(args.file, err)
-    if document is None:
+    loaded = _load_dfa(args.file, err)
+    if loaded is None:
         return USAGE
 
-    result = fsa.run(document.automaton, args.word)
+    _document, automaton = loaded
+    result = fsa.run(automaton, args.word)
     if args.quiet:
         print(result.verdict.value, file=out)
     else:
@@ -68,17 +124,18 @@ def cmd_test(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
 def cmd_run(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Run one word and show every configuration along the way."""
-    document = _load(args.file, err)
-    if document is None:
+    loaded = _load_dfa(args.file, err)
+    if loaded is None:
         return USAGE
+    _document, automaton = loaded
 
-    result = fsa.run(document.automaton, args.word)
+    result = fsa.run(automaton, args.word)
     if result.start is None:
         print(result.explain(), file=out)
         return NO
 
     # Wide enough for the widest state name *and* the column heading.
-    width = max(max((len(s) for s in document.automaton.states), default=2), 5)
+    width = max(max((len(s) for s in automaton.states), default=2), 5)
     print(f"{'':>4}  {'state':<{width}}  read  next", file=out)
     print(f"{'':>4}  {'-' * width}  ----  ----", file=out)
     for step in result.steps:
@@ -86,7 +143,7 @@ def cmd_run(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
               f"{step.target}", file=out)
 
     final = result.final_state
-    marker = "accepting" if final in document.automaton.accept else "not accepting"
+    marker = "accepting" if final in automaton.accept else "not accepting"
     print(f"{'':>4}  {final:<{width}}  {'':^4}  ({marker})", file=out)
     print("", file=out)
     print(result.explain(), file=out)
@@ -95,13 +152,13 @@ def cmd_run(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
 def cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Report structural problems with an automaton."""
-    document = _load(args.file, err)
-    if document is None:
+    loaded = _load_dfa(args.file, err)
+    if loaded is None:
         return USAGE
 
-    automaton = document.automaton
+    document, automaton = loaded
     defects = analysis.defects(automaton)
-    print(_describe(automaton), file=out)
+    print(_describe(document.automaton), file=out)
 
     if not defects:
         print("no defects", file=out)
@@ -114,24 +171,26 @@ def cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
 def cmd_sample(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """List words the automaton accepts, shortest first."""
-    document = _load(args.file, err)
-    if document is None:
+    loaded = _load_dfa(args.file, err)
+    if loaded is None:
         return USAGE
 
-    automaton = document.automaton
+    _document, automaton = loaded
     accepted = language.sample_language(automaton, args.limit, args.max_length)
+    # The empty word has to be written as something, and "" is a blank line.
+    empty = _epsilon_for(out)
 
     if args.rejected:
         rejected = language.sample_rejected(automaton, args.limit, args.max_length)
         width = max((len(w) for w in accepted + rejected), default=1)
         for word in accepted:
-            print(f"  {word or 'ε':<{max(width, 1)}}  accepted", file=out)
+            print(f"  {word or empty:<{max(width, 1)}}  accepted", file=out)
         for word in rejected:
-            print(f"  {word or 'ε':<{max(width, 1)}}  rejected", file=out)
+            print(f"  {word or empty:<{max(width, 1)}}  rejected", file=out)
         return OK if accepted else NO
 
     for word in accepted:
-        print(word or "ε", file=out)
+        print(word or empty, file=out)
 
     if not accepted:
         print(f"{PROGRAM}: no accepted words up to length {args.max_length}",
@@ -155,13 +214,16 @@ def _write_document(document: "fsa.Document", path: Optional[str],
 
 
 def cmd_determinize(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    """Turn a nondeterministic machine into an equivalent deterministic one."""
-    loaded, error = serialize.load_nfa_or_error(args.file)
-    if loaded is None:
-        print(f"{PROGRAM}: {args.file}: {error}", file=err)
+    """Turn a nondeterministic machine into an equivalent deterministic one.
+
+    The one verb that goes through :func:`_load` rather than :func:`_load_dfa`,
+    because a nondeterministic document is exactly what it is for.
+    """
+    document = _load(args.file, err)
+    if document is None:
         return USAGE
 
-    automaton, _layout, next_id = loaded
+    automaton = document.automaton
     if automaton.initial is None:
         print(f"{PROGRAM}: no initial state, so there is no language to "
               f"preserve", file=err)
@@ -169,23 +231,23 @@ def cmd_determinize(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
     result = fsa.determinize(automaton)
     print(f"{len(automaton.states)} states -> {len(result.states)}", file=out)
-    if automaton.is_deterministic():
+    if document.is_deterministic:
         print("(it was already deterministic; the subset construction still "
               "completes delta)", file=out)
 
     # Subset states are new, so the drawing is new: nothing here was placed by
     # anyone.
-    rebuilt = fsa.Document(result, fsa.Layout.auto(result), next_id)
+    rebuilt = fsa.Document(result, fsa.Layout.auto(result), document.next_id)
     return _write_document(rebuilt, args.output, out, err)
 
 
 def cmd_minimize(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Merge the states no word can tell apart."""
-    document = _load(args.file, err)
-    if document is None:
+    loaded = _load_dfa(args.file, err)
+    if loaded is None:
         return USAGE
 
-    automaton = document.automaton
+    document, automaton = loaded
     if automaton.initial is None:
         print(f"{PROGRAM}: no initial state, so there is no language to "
               f"preserve", file=err)
@@ -200,11 +262,12 @@ def cmd_minimize(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
 def cmd_complete(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Make delta total by routing undefined pairs to a trap."""
-    document = _load(args.file, err)
-    if document is None:
+    loaded = _load_dfa(args.file, err)
+    if loaded is None:
         return USAGE
 
-    missing = len(analysis.missing_transitions(document.automaton))
+    document, automaton = loaded
+    missing = len(analysis.missing_transitions(automaton))
     completed, trap = document.complete()
     if trap is None:
         print("already complete", file=out)
@@ -223,31 +286,33 @@ def cmd_equiv(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     print the shortest word that proves it. That word is the whole point: it
     turns "wrong" into "wrong on this input".
     """
-    left = _load(args.left, err)
-    right = _load(args.right, err)
-    if left is None or right is None:
+    loaded_left = _load_dfa(args.left, err)
+    loaded_right = _load_dfa(args.right, err)
+    if loaded_left is None or loaded_right is None:
         return USAGE
+    left, right = loaded_left[1], loaded_right[1]
 
-    witness = fsa.counterexample(left.automaton, right.automaton)
+    witness = fsa.counterexample(left, right)
     if witness is None:
         print("equivalent", file=out)
         return OK
 
     print(f"differ on {witness or 'the empty string'}", file=out)
-    for name, document in ((args.left, left), (args.right, right)):
-        verdict = "accepts" if fsa.accepts(document.automaton, witness) else "rejects"
+    for name, automaton in ((args.left, left), (args.right, right)):
+        verdict = "accepts" if fsa.accepts(automaton, witness) else "rejects"
         print(f"  {name} {verdict} it", file=out)
     return NO
 
 
 def cmd_export(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Write the automaton as a diagram."""
-    document = _load(args.file, err)
-    if document is None:
+    loaded = _load_dfa(args.file, err)
+    if loaded is None:
         return USAGE
 
+    document, automaton = loaded
     try:
-        text = render(document.automaton, document.layout, args.format)
+        text = render(automaton, document.layout, args.format)
     except ValueError as exc:
         print(f"{PROGRAM}: {exc}", file=err)
         return USAGE
@@ -288,33 +353,75 @@ def cmd_new(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return OK
 
 
+def _cell(targets: FrozenSet[StateId]) -> str:
+    """One cell of the table :func:`cmd_show` prints.
+
+    A set in braces when a move branches, which is the same spelling
+    :func:`fsa.subset.subset_name` gives the DFA state that branch becomes --
+    so the table and the determinized machine read as one story. A singleton
+    keeps no braces here, because in this table it is a cell rather than a
+    state name and there is nothing to tell it apart from.
+    """
+    if not targets:
+        return "-"
+    if len(targets) == 1:
+        return next(iter(targets))
+    return "{" + ",".join(sorted(targets)) + "}"
+
+
 def cmd_show(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    """Print the transition table."""
+    """Print the transition table.
+
+    Reads the document's machine as it is, nondeterminism and all, rather than
+    going through :func:`_load_dfa`: showing someone what they have is exactly
+    what they need when the answer is "more targets than you expected".
+    """
     document = _load(args.file, err)
     if document is None:
         return USAGE
 
     automaton = document.automaton
     states = sorted(automaton.states)
-    alphabet = sorted(automaton.alphabet)
     if not states:
         print("(empty automaton)", file=out)
         return OK
 
-    width = max(max(len(s) for s in states) + 2, 6)
-    header = "".join(f"{symbol:^{width}}" for symbol in alphabet)
+    # An epsilon column only when the machine has an epsilon move to put in it.
+    # A column of dashes on every deterministic file would be a permanent
+    # reminder of a feature that file does not use.
+    columns: List[Optional[Symbol]] = [s for s in sorted(automaton.alphabet)]
+    if any(symbol is EPSILON for _source, symbol, _t in automaton.sorted_transitions()):
+        columns.insert(0, EPSILON)
+
+    cells = {(state, symbol): _cell(automaton.targets(state, symbol))
+             for state in states for symbol in columns}
+    width = max(max(len(s) for s in states) + 2,
+                max((len(text) + 2 for text in cells.values()), default=0), 6)
+
+    epsilon = _epsilon_for(out)
+    header = "".join(
+        f"{epsilon if symbol is EPSILON else symbol:^{width}}"
+        for symbol in columns)
     print(f"{'':<{width}}{header}", file=out)
 
     for state in states:
         marks = ("->" if state == automaton.initial else "  ")
         marks += ("*" if state in automaton.accept else " ")
-        row = "".join(
-            f"{automaton.target(state, symbol) or '-':^{width}}"
-            for symbol in alphabet)
+        row = "".join(f"{cells[(state, symbol)]:^{width}}" for symbol in columns)
         print(f"{marks}{state:<{width - 3}}{row}", file=out)
 
+    # The legend grows only for what the table actually shows. Nondeterminism
+    # is spelled out beside the other facts, not warned about: a second target
+    # on one symbol is a legal thing to draw, and this table is where someone
+    # comes to see it.
+    legend = ["-> initial", "* accepting", "- undefined"]
+    if any(text.startswith("{") for text in cells.values()):
+        legend.append("{p,q} a choice")
+    if EPSILON in columns:
+        legend.append(f"{epsilon} reads nothing")
+
     print("", file=out)
-    print("-> initial, * accepting, - undefined", file=out)
+    print(", ".join(legend), file=out)
     return OK
 
 

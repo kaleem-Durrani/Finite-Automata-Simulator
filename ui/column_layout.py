@@ -74,9 +74,15 @@ class ColumnState:
         return entry.value
 
 
+#: States, Alphabet, Start, Accepting, Kind. Counted rather than written as a
+#: literal, because adding the fifth row and leaving this at four clipped it
+#: off the bottom of a panel that was still laid out for four.
+STATUS_ROWS = 5
+
+
 def status_body_height(*, warn_no_accepting: bool) -> int:
-    """Four rows, plus the warning line only when there is one."""
-    return 4 * 19 + (18 if warn_no_accepting else 0) + 12
+    """One line per row, plus the warning line only when there is one."""
+    return STATUS_ROWS * 19 + (18 if warn_no_accepting else 0) + 12
 
 
 def compute(state: ColumnState, *, layout: LayoutSpec, theme: Theme,

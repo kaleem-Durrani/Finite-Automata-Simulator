@@ -79,11 +79,16 @@ class GhostEdge:
 
 @dataclass(frozen=True, slots=True)
 class TokenVisual:
-    """The read head travelling along an edge during execution.
+    """One read head travelling along one edge during execution.
 
     This is the thing that makes the machine look like it is running. It moves
     continuously along :attr:`EdgeVisual.path` rather than appearing at each
     state in turn.
+
+    There may be several in a frame -- see :attr:`Scene.tokens`. A token is a
+    *branch* being taken, not "the position of the machine", which is why the
+    plural was the right shape to reach for rather than a second kind of
+    marker for the nondeterministic case.
     """
 
     position: Point
@@ -107,7 +112,16 @@ class Scene:
     edges: List[EdgeVisual] = field(default_factory=list)
     start_marker: Optional[StartMarker] = None
     ghost_edge: Optional[GhostEdge] = None
-    token: Optional[TokenVisual] = None
+
+    tokens: List[TokenVisual] = field(default_factory=list)
+    """The read heads in flight, one per branch the machine is taking.
+
+    A list rather than the single optional token this was, because a
+    nondeterministic move is several moves happening at once. Empty at rest,
+    one entry while a deterministic machine crosses an edge, and one per
+    surviving branch while a nondeterministic one does -- which is the same
+    rule stated once, not a special case bolted onto the side.
+    """
 
     def bounds(self) -> Optional[Tuple[float, float, float, float]]:
         """The world rectangle containing every node, or None if empty.

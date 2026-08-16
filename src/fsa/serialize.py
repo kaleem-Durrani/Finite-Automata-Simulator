@@ -10,16 +10,21 @@ was written, so no file in the old format exists anywhere except the one example
 checked into the repository. :func:`read_legacy` handles that one, is used once,
 and can be deleted the moment the example is re-saved.
 
-**Version 2 holds a DFA, version 3 an NFA.** The version records which value
-type wrote the file, not what the machine in it happens to look like: a
-deterministic NFA is still written as 3. That keeps writing a function of the
-type rather than of the contents, so no edit to a machine can silently change
-the shape of the file it lives in, and version 2 goes on emitting exactly the
-bytes it emits today -- which the checked-in example, a byte-for-byte
-round-trip test and the generated README table all depend on. Reading is the
-tolerant direction: :func:`loads` opens a version 3 file whenever the machine
-in it is deterministic, and :func:`loads_nfa` opens every version, because
-every DFA is an NFA.
+**Version 2 holds a deterministic machine, version 3 a nondeterministic one.**
+There is one document type now -- :class:`~fsa.document.Document` holds an NFA
+always -- so the version cannot be chosen by which type is being written, and
+is chosen by :attr:`~fsa.document.Document.is_deterministic` instead. Version 2
+therefore goes on emitting exactly the bytes it emits today for every machine
+that could have been written before, which the checked-in example, a
+byte-for-byte round-trip test and the generated README table all depend on; a
+file only becomes a version 3 file when it holds something version 2 cannot
+say. The raw :func:`dumps_nfa` is the exception and keeps the older rule: it is
+handed a bare ``NFA`` with no document around it, so all it knows is the type,
+and it writes 3 unconditionally.
+
+Reading is the tolerant direction and always was: :func:`loads` opens both
+versions, and :func:`loads_nfa` opens every version, because every DFA is an
+NFA.
 
 An NFA differs from a DFA in exactly two ways a file has to carry -- a move may
 have several targets, and a move may read nothing -- and both are written into
@@ -42,27 +47,28 @@ hand-editable and one rule is easier to hand-edit than two:
   :meth:`fsa.nfa.NFA.sorted_transitions` and how they read on screen: the move
   that costs nothing comes first.
 
-:class:`~fsa.document.Document` still holds a ``DFA`` -- widening it is Phase
-12b -- so version 3 is written and read as a bare ``(NFA, Layout, next_id)``
-triple by :func:`dumps_nfa` and :func:`loads_nfa` rather than as a document.
+:func:`dumps_nfa` and :func:`loads_nfa` remain for callers holding a bare
+``(NFA, Layout, next_id)`` triple rather than a document -- reading a machine
+out of a file without placing its states, which is what makes their round trip
+exact.
 """
 
 import json
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from fsa.automaton import DFA
-from fsa.document import Document
-from fsa.errors import AutomatonError, NondeterministicError
+from fsa.document import Document, next_id_for
+from fsa.errors import AutomatonError
 from fsa.layout import Layout
-from fsa.nfa import NFA, from_dfa, to_dfa
+from fsa.nfa import NFA
 from fsa.symbols import StateId, Symbol
 
-#: The version a document holding a DFA is written as. Frozen, and not merely
+#: The version a deterministic document is written as. Frozen, and not merely
 #: by convention: the example file, the README table generated from it and a
 #: byte-for-byte test all pin the exact output of version 2.
 VERSION = 2
 
-#: The version a document holding an NFA is written as.
+#: The version a nondeterministic document is written as.
 NFA_VERSION = 3
 
 #: Every version this build understands, in the order the error message lists
@@ -101,8 +107,17 @@ def _layout_to_dict(layout: Layout) -> Dict[str, Any]:
 
 
 def to_dict(document: Document) -> Dict[str, Any]:
-    """A plain, sorted, JSON-ready snapshot."""
-    automaton = document.automaton
+    """A plain, sorted, JSON-ready snapshot, at whichever version fits.
+
+    Version 2 when the machine is deterministic, and then byte-for-byte what
+    this function has always emitted -- the deterministic view is the very
+    machine a document used to hold. Version 3 only when the file has something
+    to say that version 2 has no way to write down.
+    """
+    if not document.is_deterministic:
+        return to_nfa_dict(document.automaton, document.layout, document.next_id)
+
+    automaton = document.as_dfa()
     return {
         "version": VERSION,
         "automaton": {
@@ -158,8 +173,10 @@ def dumps(document: Document) -> str:
 def dumps_nfa(automaton: NFA, layout: Layout, next_id: int) -> str:
     """Serialise a nondeterministic machine and its drawing to text.
 
-    Takes the three pieces separately because there is no document type that
-    holds an NFA yet; :func:`loads_nfa` gives the same three back.
+    Takes the three pieces separately rather than a document, and always writes
+    version 3: this is the raw door, for a caller holding a machine that has
+    not been made a document of. :func:`loads_nfa` gives the same three back,
+    unplaced, so the round trip through this pair is exact.
     """
     return json.dumps(to_nfa_dict(automaton, layout, next_id), indent=2) + "\n"
 
@@ -209,17 +226,12 @@ def _next_id_from(data: Dict[str, Any], states: FrozenSet[StateId]) -> int:
     A hand-written file will not have thought about an id counter, and a file
     that declares one may still name it below a state it contains -- either way
     the next state added would collide with an existing one. Both are fixed by
-    the rule :meth:`fsa.document.Document.of` applies to a DFA: at least one
-    past the highest ``qN`` in the file. The rule is written twice today,
-    here and there, because a ``Document`` cannot hold an NFA yet; Phase 12b
-    should leave one copy.
+    raising whatever the file said to :func:`fsa.document.next_id_for`, which
+    is the same rule :meth:`fsa.document.Document.of` applies, called rather
+    than copied.
     """
-    highest = -1
-    for state in states:
-        if state.startswith("q") and state[1:].isdigit():
-            highest = max(highest, int(state[1:]))
     declared = data.get("next_id")
-    return max(highest + 1, declared if isinstance(declared, int) else 0)
+    return max(next_id_for(states), declared if isinstance(declared, int) else 0)
 
 
 def from_dict(data: Dict[str, Any]) -> Document:
@@ -283,15 +295,15 @@ def from_nfa_dict(data: Dict[str, Any]) -> Tuple[NFA, Layout, int]:
     coordinates. It returns the file's three values as they were written, so
     that ``loads_nfa(dumps_nfa(x)) == x`` exactly rather than nearly; inventing
     a position would make that false for every machine whose layout is partial.
-    Placement belongs to whatever holds the machine and its drawing together --
-    ``Document.of`` for a DFA, and its Phase 12b counterpart for this.
+    Placement belongs to whatever holds the machine and its drawing together,
+    which is :meth:`fsa.document.Document.of`.
     """
     if not isinstance(data, dict):
         raise DocumentFormatError("not an object")
 
     if data.get("version") != NFA_VERSION:
         document = from_dict(data)
-        return from_dfa(document.automaton), document.layout, document.next_id
+        return document.automaton, document.layout, document.next_id
 
     body = data.get("automaton")
     if not isinstance(body, dict):
@@ -337,24 +349,19 @@ def from_nfa_dict(data: Dict[str, Any]) -> Tuple[NFA, Layout, int]:
 
 
 def _document_from_nfa(automaton: NFA, layout: Layout, next_id: int) -> Document:
-    """A version 3 file as a document, when it can be one.
+    """A version 3 file as a document.
 
-    ``Document.automaton`` is a ``DFA`` until Phase 12b, and a version 3 file
-    holding a machine that happens to be deterministic is an ordinary thing to
-    write -- so it opens. Anything else is refused with the state and symbol
-    that made it nondeterministic, which is the only honest answer available:
-    determinising here would open a file and show a machine with different
-    states from the one that was saved. :func:`fsa.nfa.to_dfa` refuses for the
-    same reason, and its message is worth repeating rather than replacing.
+    Every version 3 file opens, nondeterministic ones included -- that is what
+    widening ``Document.automaton`` bought, and it is why the reader no longer
+    has to choose between refusing the file and quietly determinising it. Both
+    answers were bad: one loses the machine, the other opens a file and shows a
+    machine with different states from the one that was saved.
+
+    Unlike :func:`from_nfa_dict` this places states the file gave no
+    coordinates for, because a document is the thing that promises every state
+    has somewhere to be.
     """
-    try:
-        deterministic = to_dfa(automaton)
-    except NondeterministicError as exc:
-        raise DocumentFormatError(
-            f"this file holds a nondeterministic machine, and this build can "
-            f"only open deterministic ones as a document ({exc})") from exc
-
-    document = Document.of(deterministic, layout)
+    document = Document.of(automaton, layout)
     return Document(document.automaton, document.layout,
                     max(document.next_id, next_id))
 

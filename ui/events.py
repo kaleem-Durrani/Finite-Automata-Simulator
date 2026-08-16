@@ -177,8 +177,19 @@ class RenameState(UiEvent):
 
 @dataclass(frozen=True)
 class RemoveTransition(UiEvent):
+    """Remove one arrow, or every arrow on one symbol.
+
+    ``symbol`` is ``None`` for an epsilon move -- the same spelling the engine
+    uses -- so an epsilon edge can be removed like any other. ``target`` names
+    the one branch to drop; without it every target on that symbol goes. It
+    matters because delta may now have several: this request comes from a menu
+    opened on one drawn edge, and that edge is one branch of the move, not all
+    of it.
+    """
+
     source: StateId
-    symbol: Symbol
+    symbol: Optional[Symbol]
+    target: Optional[StateId] = None
 
 
 @dataclass(frozen=True)
@@ -200,6 +211,11 @@ class MinimizeAutomaton(UiEvent):
 @dataclass(frozen=True)
 class TrimAutomaton(UiEvent):
     """Drop every state that cannot appear on an accepting run."""
+
+
+@dataclass(frozen=True)
+class DeterminizeAutomaton(UiEvent):
+    """Replace the machine with the subset construction of itself."""
 
 
 @dataclass(frozen=True)

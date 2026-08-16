@@ -5,7 +5,7 @@ This module manages all UI components including toolbars, input fields,
 context menus, and help panels.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import pygame
 
@@ -88,14 +88,18 @@ class UIManager:
         self.input_active = False
         self.test_result = ""
         self.test_verdict = ""
-        self.selected_symbol = 'a'
+        self.selected_symbol: Optional[str] = 'a'
         self.context_menu: Optional[ContextMenu] = None
         
         # The palette *is* the automaton's alphabet, kept in sync by
         # sync_symbols_with. It used to be a separate hardcoded list, so the
         # symbols you could draw with and the symbols the machine recognised
         # were two unrelated sets.
-        self.available_symbols: List[str] = []
+        # Epsilon rides in this list as ``None`` -- the engine's own
+        # spelling. It cannot be the character: `is_legal_symbol` accepts
+        # it, so an alphabet may genuinely contain one, and a sentinel
+        # that collides with real data is not a sentinel.
+        self.available_symbols: List[Optional[str]] = []
 
         # Symbol addition dialog state
         self.adding_symbol = False
@@ -342,7 +346,7 @@ class UIManager:
         self._marking_cells = {}
         self._marking_close = None
 
-    def draw_legend(self, automaton: "fsa.DFA") -> None:
+    def draw_legend(self, automaton: "fsa.AnyAutomaton") -> None:
         """Explain the state styles, showing only the kinds actually present."""
         rect = next((r for key, r, _t in self._column if key == "legend"), None)
         column.draw_legend(self.chrome, rect=rect, automaton=automaton,
@@ -353,14 +357,21 @@ class UIManager:
                            mouse_pos=pygame.mouse.get_pos())
 
     def draw_execution_status(self, execution_active: bool, execution_step: int,
-                              _execution_string: str, execution_path: List[str],
+                              _execution_string: str,
+                              configurations: Sequence[FrozenSet[str]],
                               run: Optional[Any] = None) -> None:
-        """Draw the execution trace panel."""
+        """Draw the execution trace panel.
+
+        ``configurations`` is a set of states per position in the run -- a set
+        of one for a deterministic machine. The panel takes sets because the
+        machine may be in several states at once, and one shape for both cases
+        is one code path for both cases.
+        """
         panel = next((r for key, r, _t in self._column if key == "run"), None)
         run_panel.draw_run_panel(
             self.chrome, panel=panel, layout=self.layout,
             execution_active=execution_active, execution_step=execution_step,
-            execution_path=execution_path, run=run,
+            configurations=configurations, run=run,
             animation_active=getattr(self, "_animation_active", False),
             animation_speed=self.animation_speed,
             slider=self.speed_slider_rect,
@@ -819,7 +830,7 @@ class UIManager:
         self.confirm_message = ""
         self.confirm_intent = None
 
-    def sync_symbols_with(self, automaton: "fsa.DFA"):
+    def sync_symbols_with(self, automaton: "fsa.AnyAutomaton"):
         """Adopt the automaton's alphabet as the palette.
 
         One source of truth: what you can draw with is exactly what the machine
@@ -827,7 +838,7 @@ class UIManager:
         symbols could be unusable and a palette symbol could be outside the
         alphabet entirely.
         """
-        self.available_symbols = sorted(automaton.alphabet)
+        self.available_symbols = [*sorted(automaton.alphabet), None]
         if self.available_symbols and self.selected_symbol not in self.available_symbols:
             self.selected_symbol = self.available_symbols[0]
         self._recompute_symbol_buttons()
@@ -951,7 +962,7 @@ class UIManager:
         self.strip_scroll.update(dt)
         self.strip_pop.update(dt)
 
-    def draw(self, automaton: "fsa.DFA", test_result: str = "",
+    def draw(self, automaton: "fsa.AnyAutomaton", test_result: str = "",
              animation_active: bool = False, execution_active: bool = False):
         """
         Draw all UI elements.

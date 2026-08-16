@@ -27,6 +27,7 @@ from rendering.scene import NodeKind
 from ui import context_menu, dialogs, events, layout_spec
 from ui.panels import column as column_module
 from ui.panels import diagnostics as diagnostics_panel
+from ui.panels import run_panel as run_panel_module
 
 
 @pytest.fixture
@@ -36,6 +37,29 @@ def app(tmp_path, monkeypatch):
     simulator = AutomatonSimulator()
     yield simulator
     pygame.quit()
+
+
+def as_dfa(app: AutomatonSimulator):
+    """The canvas's machine as a DFA.
+
+    ``editor.automaton`` is an ``NFA`` now, and the engine's analysis and
+    simulation take a DFA -- so a test that wants to ask one of them a question
+    asks the document for its deterministic view first, exactly as the
+    application does.
+    """
+    return app.editor.document.as_dfa()
+
+
+def configurations(app: AutomatonSimulator):
+    """Where the run stands at each position, as plain sets.
+
+    ``execution_trace`` holds a configuration *and* the edges entered by, and a
+    test that wants the states should say so rather than comparing whole
+    positions. Sets, not sorted lists, because a configuration has no order --
+    comparing against ``[{"q0"}]`` says that and comparing against ``[["q0"]]``
+    quietly does not.
+    """
+    return [set(position.configuration) for position in app.execution_trace]
 
 
 def pump(app: AutomatonSimulator, frames: int = 3):
@@ -170,7 +194,8 @@ def test_delete_while_dragging_does_not_crash_on_release(app):
 
 def test_delete_state_in_active_trace_stops_execution(app):
     app._test_string("ab")
-    assert app.execution_active and "q1" in app.execution_path
+    assert app.execution_active
+    assert any("q1" in position.configuration for position in app.execution_trace)
 
     app.editor.select("q1")
     app._delete_selected_state()
@@ -310,7 +335,7 @@ def test_the_legacy_dead_end_flag_is_not_honoured_on_load(app, tmp_path):
 
     app._load_from_path("legacy.json")
 
-    assert fsa.accepts(app.editor.automaton, "aa"), "delta says this is accepted"
+    assert fsa.accepts(as_dfa(app), "aa"), "delta says this is accepted"
     assert app.editor.analysis()[0] == frozenset(), "and nothing is a trap"
 
 
@@ -352,7 +377,7 @@ def test_load_adopts_the_files_alphabet(app, tmp_path):
     (tmp_path / "x.json").write_text(serialize.dumps(document), encoding="utf-8")
 
     app._load_from_path("x.json")
-    assert app.ui_manager.available_symbols == ["x"]
+    assert app.ui_manager.available_symbols == ["x", None]
     assert app.ui_manager.selected_symbol == "x"
 
 
@@ -703,7 +728,7 @@ def test_speed_slider_can_be_dragged_and_is_read(app):
 def test_symbol_buttons_are_clickable_before_the_first_draw(app):
     """Rects used to be produced as a side effect of drawing."""
     manager = app.ui_manager
-    assert set(manager.symbol_buttons) == set(app.editor.automaton.alphabet)
+    assert set(manager.symbol_buttons) == set(app.editor.automaton.alphabet) | {None}
     click(app, manager.symbol_buttons["b"].center)
     assert manager.selected_symbol == "b"
 
@@ -713,15 +738,24 @@ def test_symbol_buttons_are_clickable_before_the_first_draw(app):
 # ---------------------------------------------------------------------------
 
 
-def test_the_palette_is_the_alphabet(app):
+def test_the_palette_is_the_alphabet_plus_epsilon(app):
     """They used to be two unrelated sets: you could draw with a symbol the
-    machine did not recognise, and vice versa."""
-    assert app.ui_manager.available_symbols == sorted(app.editor.automaton.alphabet)
+    machine did not recognise, and vice versa.
+
+    The palette now carries one chip the alphabet never contains: the epsilon
+    move, held as `None` because `is_legal_symbol` accepts the character, so an
+    alphabet may genuinely have an epsilon in it and a sentinel that collides
+    with real data is not a sentinel.
+    """
+    alphabet = sorted(app.editor.automaton.alphabet)
+    assert app.ui_manager.available_symbols == [*alphabet, None]
 
     app._add_symbol("z")
     assert "z" in app.editor.automaton.alphabet
-    assert app.ui_manager.available_symbols == sorted(app.editor.automaton.alphabet)
+    assert app.ui_manager.available_symbols == [
+        *sorted(app.editor.automaton.alphabet), None]
     assert "z" in app.ui_manager.symbol_buttons
+    assert None in app.ui_manager.symbol_buttons, "epsilon is drawable"
 
 
 def test_reserved_letters_can_now_be_symbols(app):
@@ -783,7 +817,7 @@ def test_the_empty_string_can_be_tested(app):
     """The old UI refused it outright."""
     app._test_string("")
     assert app.execution_active
-    assert app.execution_path == ["q0"]
+    assert configurations(app) == [{"q0"}]
     assert "empty string" in app.ui_manager.test_result
     pump(app)
 
@@ -800,7 +834,7 @@ def test_app_language_matches_the_transition_function(app):
 
     app._test_string("aa")
     assert app.ui_manager.test_verdict == "accept"
-    assert app.execution_path == [q0, q1, q2]
+    assert configurations(app) == [{q0}, {q1}, {q2}]
 
 
 # ---------------------------------------------------------------------------
@@ -816,7 +850,7 @@ def test_nothing_is_a_trap_when_nothing_accepts(app):
     document, q1 = document.add_state((150.0, 0.0))
     editor.apply(document.add_transition(q0, "a", q1).set_initial(q0))
 
-    assert fsa.dead_states(app.editor.automaton) == {q0, q1}, "the maths is unchanged"
+    assert fsa.dead_states(as_dfa(app)) == {q0, q1}, "the maths is unchanged"
     assert app.editor.analysis()[0] == frozenset(), "the display stays quiet"
 
     kinds = {node.kind for node in app._build_scene().nodes}
@@ -912,8 +946,8 @@ def test_make_trap_actually_makes_a_trap(app):
     app._make_trap("q1")
 
     automaton = app.editor.automaton
-    assert {s: automaton.target("q1", s) for s in automaton.alphabet} == {
-        s: "q1" for s in automaton.alphabet}
+    assert {s: automaton.targets("q1", s) for s in automaton.alphabet} == {
+        s: frozenset({"q1"}) for s in automaton.alphabet}
     assert "q1" not in automaton.accept
 
     kinds = {node.id: node.kind for node in app._build_scene().nodes}
@@ -1041,7 +1075,7 @@ def test_diagnostics_list_exactly_the_missing_pairs(app):
 def test_fix_button_completes_the_automaton_in_one_click(app):
     """The Phase 6 exit criterion: event replay, not a direct call."""
     incomplete_machine(app)
-    assert not fsa.is_complete(app.editor.automaton)
+    assert not fsa.is_complete(as_dfa(app))
 
     pump(app, frames=30)          # let the diagnostics panel slide in
     assert app.ui_manager._fix_button is not None, "the Fix button is on screen"
@@ -1049,7 +1083,7 @@ def test_fix_button_completes_the_automaton_in_one_click(app):
     click(app, app.ui_manager._fix_button.center)
     pump(app)
 
-    assert fsa.is_complete(app.editor.automaton)
+    assert fsa.is_complete(as_dfa(app))
     assert "routed" in app.message_text
     # The new trap has coordinates and is drawn as a trap.
     trap = next(s for s in app.editor.automaton.states if s.startswith("trap"))
@@ -1060,11 +1094,11 @@ def test_fix_button_completes_the_automaton_in_one_click(app):
 def test_completion_preserves_the_language(app):
     q0, q1 = incomplete_machine(app)
     words = ["", "a", "b", "ab", "aa", "ba", "abab"]
-    before = {w: fsa.accepts(app.editor.automaton, w) for w in words}
+    before = {w: fsa.accepts(as_dfa(app), w) for w in words}
 
     app._complete_automaton()
 
-    after = {w: fsa.accepts(app.editor.automaton, w) for w in words}
+    after = {w: fsa.accepts(as_dfa(app), w) for w in words}
     assert after == before
 
 
@@ -1102,7 +1136,7 @@ def test_clicking_a_defect_row_focuses_its_states(app):
 def test_back_step_reproduces_the_identical_path(app):
     """Phase 6 exit criterion: end -> 0 -> end again, same path throughout."""
     app._test_string("aab")
-    original = list(app.execution_path)
+    original = configurations(app)
 
     for _ in range(len(original)):
         app._next_execution_step()
@@ -1118,7 +1152,7 @@ def test_back_step_reproduces_the_identical_path(app):
         app._next_execution_step()
         pump(app, frames=2)
 
-    assert list(app.execution_path) == original
+    assert configurations(app) == original
     assert app.execution_step == len(original) - 1
 
 
@@ -1167,7 +1201,7 @@ def test_the_token_despawns_when_its_travel_settles(app):
 
     pump(app, frames=40)          # let the travel settle
     assert app.traversing_step is None
-    assert app._build_token(app._edge_paths(app.editor.positions())) is None
+    assert app._build_tokens(app._edge_paths(app.editor.positions())) == []
 
 
 def test_the_column_never_reaches_the_strip_band(app):
@@ -1294,14 +1328,14 @@ def test_right_click_on_an_edge_offers_its_symbols(app):
 
 
 def test_removing_a_symbol_from_an_edge(app):
-    assert app.editor.automaton.target("q0", "b") == "q1"
+    assert as_dfa(app).target("q0", "b") == "q1"
     app._process_ui_events([events.RemoveTransition("q0", "b")])
 
-    assert app.editor.automaton.target("q0", "b") is None
+    assert as_dfa(app).target("q0", "b") is None
     assert "Removed q0 --b--> q1" in app.message_text
 
     chord(app, pygame.K_z, pygame.KMOD_CTRL)
-    assert app.editor.automaton.target("q0", "b") == "q1", "and it is undoable"
+    assert as_dfa(app).target("q0", "b") == "q1", "and it is undoable"
 
 
 def test_straighten_clears_the_arc(app):
@@ -1743,7 +1777,7 @@ def test_the_transition_tool_draws_without_shift(app):
     assert app.editor.pending_source == "q0"
     click(app, screen_of(app, "q2"))
 
-    assert app.editor.automaton.target("q0", "a") == "q2"
+    assert as_dfa(app).target("q0", "a") == "q2"
     assert app.editor.pending_source is None
 
 
@@ -1754,7 +1788,7 @@ def test_shift_click_still_draws_a_transition(app):
 
     click(app, screen_of(app, "q0"), shift=True)
     click(app, screen_of(app, "q2"))
-    assert app.editor.automaton.target("q0", "a") == "q2"
+    assert as_dfa(app).target("q0", "a") == "q2"
 
 
 def test_tools_are_exclusive_and_click_off(app):
@@ -1919,7 +1953,7 @@ def test_an_automaton_over_qwr_can_be_built_by_typing(app):
 
     click(app, screen_of(app, "q0"), shift=True)
     click(app, screen_of(app, "q2"))
-    assert app.editor.automaton.target("q0", "r") == "q2"
+    assert as_dfa(app).target("q0", "r") == "q2"
 
 
 def test_editing_shortcuts_are_chords(app):
@@ -1929,7 +1963,7 @@ def test_editing_shortcuts_are_chords(app):
     assert ("q0" in app.editor.automaton.accept) != before
 
     chord(app, pygame.K_t, pygame.KMOD_CTRL)
-    assert app.editor.automaton.target("q0", "a") == "q0"
+    assert as_dfa(app).target("q0", "a") == "q0"
 
 
 def test_arrow_keys_step_the_run(app):
@@ -2045,7 +2079,7 @@ def test_minimise_from_the_canvas_menu_reduces_and_keeps_the_language(app):
     """
     app.editor.replace(redundant_document(), None)
     app.ui_manager.sync_symbols_with(app.editor.automaton)
-    before = app.editor.automaton
+    before = as_dfa(app)
     assert len(before.states) == 4
 
     click(app, canvas_point(app, 0.5), button=3)
@@ -2053,7 +2087,7 @@ def test_minimise_from_the_canvas_menu_reduces_and_keeps_the_language(app):
     click(app, menu_row(app, "Minimise"))
     pump(app, frames=5)
 
-    after = app.editor.automaton
+    after = as_dfa(app)
     assert len(after.states) < len(before.states)
     assert fsa.equivalent(before, after), "minimising changed the language"
 
@@ -2117,14 +2151,14 @@ def test_a_generated_machine_is_laid_out_and_fits_the_view(app):
 
 def test_trim_from_the_canvas_menu_drops_the_useless_states(app):
     app.editor.replace(redundant_document(), None)
-    before = app.editor.automaton
+    before = as_dfa(app)
     assert "q3" in before.states, "q3 reaches nothing accepting"
 
     click(app, canvas_point(app, 0.5), button=3)
     click(app, menu_row(app, "Trim"))
     pump(app, frames=5)
 
-    after = app.editor.automaton
+    after = as_dfa(app)
     assert "q3" not in after.states
     for word in ["", "a", "b", "ab", "ba", "aab"]:
         assert fsa.accepts(after, word) == fsa.accepts(before, word)
@@ -2147,7 +2181,7 @@ def test_a_diagnostic_message_is_shown_in_full(app):
                        None)
     pump(app, frames=40)
 
-    defect = next(d for d in fsa.defects(automaton) if d.kind == "incomplete")
+    defect = next(d for d in fsa.defects(as_dfa(app)) if d.kind == "incomplete")
     font = app.ui_manager.chrome.fonts.ui("tiny")
     budget = diagnostics_panel._text_budget(
         layout_spec.PANEL_WIDTH - 12, defect)
@@ -2289,3 +2323,261 @@ def test_a_machine_with_one_state_has_no_pairs_to_show(app):
     app._show_marking_table()
     assert app.ui_manager.marking_table is None
     assert "two states" in app.message_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 12b: nondeterminism on the canvas
+# ---------------------------------------------------------------------------
+
+
+def branching(app):
+    """Give the demo a second `a`-edge out of q0, the way a user would."""
+    app.ui_manager.selected_symbol = "a"
+    click(app, screen_of(app, "q0"), shift=True)
+    click(app, screen_of(app, "q1"))
+    return app.editor.automaton
+
+
+def test_a_second_edge_on_one_symbol_is_drawn_rather_than_swallowed(app):
+    """It used to replace the first, silently -- which is exactly why an NFA
+    could not be drawn at all."""
+    automaton = branching(app)
+    assert automaton.targets("q0", "a") == {"q0", "q1"}
+    assert not app.editor.is_deterministic
+    assert "nondeterministic" in app.message_text
+
+
+def test_the_frame_loop_survives_a_nondeterministic_machine(app):
+    """Every frame reads the analysis and builds a scene. Neither may raise:
+    an exception here is a window closing while somebody is drawing."""
+    branching(app)
+    pump(app, frames=10)
+
+    assert app.running
+    assert app.editor.defects() == ()
+    kinds = {node.kind for node in app._build_scene().nodes}
+    assert kinds == {NodeKind.NORMAL}, "nothing is guessed at, so nothing is marked"
+
+
+def test_an_epsilon_edge_renders_without_crashing(app):
+    """`sorted` raises on a symbol set holding None and `", ".join` cannot
+    write it, so both were a crash the first time one was drawn. Epsilon comes
+    first in the label, matching the file and the transition table."""
+    app.editor.add_transition("q0", None, "q2")
+    app.editor.add_transition("q0", "b", "q2")
+    pump(app, frames=5)
+
+    label = next(edge.label for edge in app._build_scene().edges
+                 if edge.key == ("q0", "q2"))
+    assert label == "ε, b"
+
+
+@pytest.mark.parametrize("action", [
+    "_minimize_automaton", "_trim_automaton", "_complete_automaton",
+    "_show_marking_table",
+])
+def test_every_dfa_only_action_says_determinize_instead_of_raising(app, action):
+    # Running a string is deliberately absent: it is no longer DFA-only. The
+    # simulator picks fsa.nfa.run for a nondeterministic document instead of
+    # refusing, which is what the tests below check.
+    branching(app)
+    before = app.editor.document
+
+    getattr(app, action)()
+
+    assert "determinize" in app.message_text.lower()
+    assert app.editor.document == before, "and nothing was changed"
+    assert not app.execution_active
+
+
+def test_removing_one_drawn_edge_leaves_the_other(app):
+    """The menu belongs to one edge, so it must take one branch. Removing the
+    symbol outright would delete the arrow to q0 as well."""
+    branching(app)
+    app._process_ui_events([events.RemoveTransition("q0", "a", "q1")])
+
+    assert app.editor.automaton.targets("q0", "a") == {"q0"}
+    assert "Removed q0 --a--> q1" in app.message_text
+
+
+def test_the_edge_menu_offers_to_remove_only_that_edges_symbols(app):
+    branching(app)
+    app._show_edge_context_menu((0, 0), ("q0", "q1"))
+    menu = app.ui_manager.context_menu
+
+    assert menu is not None
+    removals = [item.event for item in menu.items
+                if item.label.startswith("Remove ")]
+    assert removals == [events.RemoveTransition("q0", "a", "q1"),
+                        events.RemoveTransition("q0", "b", "q1")]
+
+
+# ---------------------------------------------------------------------------
+# Phase 12b: running a nondeterministic machine
+# ---------------------------------------------------------------------------
+
+
+def lit_states(app):
+    """The states the canvas is currently lighting as part of the run."""
+    return {node.id for node in app._build_scene().nodes if node.active > 0.5}
+
+
+def dying_branches(app):
+    """A machine whose only move on 'a' splits, and whose branches both stop.
+
+    Not a defect and not an incomplete DFA: two arrows leave q0, both are
+    followed, and neither destination can read a 'b'. The run has to say that
+    without accusing the diagram of missing an arrow.
+    """
+    editor = blank(app, "a", "b")
+    document, q0 = editor.document.add_state((0.0, 0.0))
+    document, q1 = document.add_state((160.0, 0.0))
+    document, q2 = document.add_state((160.0, 160.0))
+    document = document.add_transition(q0, "a", q1).add_transition(q0, "a", q2)
+    editor.apply(document.toggle_accept(q1).set_initial(q0))
+    return q0, q1, q2
+
+
+def test_running_a_word_on_an_nfa_lights_every_state_it_is_in(app):
+    """Phase 12b exit criterion, driven through the same event the test panel
+    posts: the canvas lights the whole configuration, not one state picked out
+    of it."""
+    branching(app)
+    app._process_ui_events([events.TestString("a")])
+    pump(app, frames=30)
+
+    assert app.execution_active
+    assert configurations(app) == [{"q0"}, {"q0", "q1"}]
+    assert lit_states(app) == {"q0"}, "position 0, before the symbol is read"
+
+    app._next_execution_step()
+    pump(app, frames=30)
+    assert lit_states(app) == {"q0", "q1"}
+
+
+def test_the_configuration_keeps_spreading_as_the_word_is_read(app):
+    """The lesson nondeterminism has to teach is the frontier growing and
+    collapsing, so the trace has to hold every set, not just the last."""
+    branching(app)
+    app._test_string("aa")
+
+    assert configurations(app) == [{"q0"}, {"q0", "q1"}, {"q0", "q1", "q2"}]
+    assert app.ui_manager.test_verdict == "accept"
+
+
+def test_a_deterministic_run_is_untouched_by_any_of_this(app):
+    """The common case must not pay for the rare one: the DFA simulator, one
+    state per position, one token on the edge between them."""
+    app._test_string("ab")
+
+    assert app.editor.is_deterministic
+    assert isinstance(app.run_result, fsa.Run)
+    assert configurations(app) == [{"q0"}, {"q0"}, {"q1"}]
+    assert [position.entered_by for position in app.execution_trace] == [
+        (), (("q0", "q0"),), (("q0", "q1"),)]
+
+
+def test_a_branching_move_puts_a_token_on_every_branch(app):
+    """A single token on one of two edges would draw a machine that made a
+    choice, and choosing is the one thing an NFA does not do."""
+    branching(app)
+    app._test_string("a")
+    app._next_execution_step()
+    pump(app, frames=2)
+
+    assert app.execution_trace[1].entered_by == (("q0", "q0"), ("q0", "q1"))
+    tokens = app._build_tokens(app._edge_paths(app.editor.positions()))
+    assert len(tokens) == 2
+    assert len({token.position for token in tokens}) == 2, "on different edges"
+
+
+def test_the_tokens_are_gone_again_once_the_travel_settles(app):
+    """Same rule as the single token had: at rest the lit states say where the
+    machine is, and markers parked on the rims cover the labels."""
+    branching(app)
+    app._test_string("a")
+    app._next_execution_step()
+    pump(app, frames=40)
+
+    assert app.traversing_step is None
+    assert app._build_tokens(app._edge_paths(app.editor.positions())) == []
+
+
+def test_stepping_back_through_a_branching_run_reproduces_it(app):
+    """Phase 6's back-step criterion, now that a position is a set."""
+    branching(app)
+    app._test_string("aa")
+    original = configurations(app)
+
+    for _ in range(len(original)):
+        app._next_execution_step()
+        pump(app, frames=2)
+    assert app.execution_step == len(original) - 1
+
+    for _ in range(len(original)):
+        app._previous_execution_step()
+        pump(app, frames=2)
+
+    assert app.execution_step == 0
+    assert configurations(app) == original
+
+
+def test_epsilon_moves_are_taken_before_the_first_symbol_is_read(app):
+    """A machine that accepts for free shows it in its very first frame -- and
+    no token travels the epsilon edge, because nothing is read to cross it."""
+    editor = blank(app, "a")
+    document, q0 = editor.document.add_state((0.0, 0.0))
+    document, q1 = document.add_state((160.0, 0.0))
+    editor.apply(document.add_transition(q0, None, q1)
+                 .toggle_accept(q1).set_initial(q0))
+
+    app._test_string("")
+    pump(app, frames=30)
+
+    assert configurations(app) == [{q0, q1}]
+    assert app.ui_manager.test_verdict == "accept"
+    assert lit_states(app) == {q0, q1}
+    assert app._build_tokens(app._edge_paths(app.editor.positions())) == []
+
+
+def test_a_run_that_loses_every_branch_does_not_blame_the_diagram(app):
+    """A DFA with no arrow is incomplete. An NFA that runs out of branches is
+    an ordinary rejection, and the panel's one line has to stay true of both --
+    which the old wording, the verdict name with its underscores stripped,
+    was not."""
+    q0, q1, q2 = dying_branches(app)
+    app._test_string("ab")
+    pump(app, frames=5)
+
+    assert configurations(app) == [{q0}, {q1, q2}]
+    assert app.ui_manager.test_verdict == "reject_no_transition"
+    assert "every branch died" in app.ui_manager.test_result
+    assert run_panel_module.verdict_line(app.run_result) == "ran out of moves: 'b' at 1"
+
+
+def test_the_run_panel_names_a_set_only_when_there_is_one():
+    """"in q0" is a lie when the machine is also in q1; "in {q0}" is noise
+    when it is not."""
+    assert run_panel_module.show_configuration(frozenset({"q0"})) == "q0"
+    assert run_panel_module.show_configuration(frozenset({"q2", "q0"})) == "{q0, q2}"
+    assert run_panel_module.show_configuration(frozenset()) == "-"
+
+
+def test_editing_a_branch_out_from_under_a_live_run_does_not_crash(app):
+    """The trace records what the machine did; the canvas is free to have moved
+    on. A token whose edge is gone is skipped, not raised on."""
+    branching(app)
+    app._test_string("a")
+    app._next_execution_step()
+    pump(app, frames=2)
+    assert app._build_tokens(app._edge_paths(app.editor.positions()))
+
+    # Both symbols, so the *drawn* edge goes: removing only 'a' would leave
+    # the demo's 'b' arrow between the same two states, and the path with it.
+    app._process_ui_events([events.RemoveTransition("q0", "a", "q1"),
+                            events.RemoveTransition("q0", "b", "q1")])
+    pump(app, frames=5)
+
+    assert app.running
+    assert ("q0", "q1") not in app._edge_paths(app.editor.positions())
+    assert len(app._build_tokens(app._edge_paths(app.editor.positions()))) == 1

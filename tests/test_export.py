@@ -41,16 +41,16 @@ def demo():
 @pytest.mark.parametrize("fmt", sorted(FORMATS))
 def test_output_is_deterministic(demo, fmt):
     """A golden file is worthless if the bytes move between runs."""
-    assert render(demo.automaton, demo.layout, fmt) == \
-           render(demo.automaton, demo.layout, fmt)
+    assert render(demo.as_dfa(), demo.layout, fmt) == \
+           render(demo.as_dfa(), demo.layout, fmt)
 
 
 @pytest.mark.parametrize("fmt", sorted(FORMATS))
 def test_every_state_and_symbol_appears(demo, fmt):
-    text = render(demo.automaton, demo.layout, fmt)
-    for state in demo.automaton.states:
+    text = render(demo.as_dfa(), demo.layout, fmt)
+    for state in demo.as_dfa().states:
         assert state in text.replace("s" + state, state), f"{fmt}: {state} missing"
-    for symbol in demo.automaton.alphabet:
+    for symbol in demo.as_dfa().alphabet:
         assert symbol in text, f"{fmt}: {symbol} missing"
 
 
@@ -61,7 +61,7 @@ def test_an_empty_automaton_does_not_crash(fmt):
 
 def test_an_unknown_format_is_refused(demo):
     with pytest.raises(ValueError, match="unknown format"):
-        render(demo.automaton, demo.layout, "png")
+        render(demo.as_dfa(), demo.layout, "png")
 
 
 # ---------------------------------------------------------------------------
@@ -70,25 +70,25 @@ def test_an_unknown_format_is_refused(demo):
 
 
 def test_dot_marks_the_initial_and_accepting_states(demo):
-    text = to_dot(demo.automaton)
+    text = to_dot(demo.as_dfa())
     assert "__start -> \"q0\"" in text
     assert 'shape=doublecircle' in text
 
 
 def test_dot_styles_a_trap(demo):
-    text = to_dot(demo.automaton)
+    text = to_dot(demo.as_dfa())
     trap_line = next(line for line in text.splitlines() if line.startswith('  "q2" ['))
     assert "fillcolor" in trap_line
 
 
 def test_dot_can_omit_annotation(demo):
-    text = to_dot(demo.automaton, annotate=False)
+    text = to_dot(demo.as_dfa(), annotate=False)
     assert "fillcolor" not in text
     assert "shape=doublecircle" in text, "accepting is structure, not annotation"
 
 
 def test_dot_groups_symbols_on_one_edge(demo):
-    text = to_dot(demo.automaton)
+    text = to_dot(demo.as_dfa())
     assert '"q2" -> "q2" [label="0, 1"]' in text or '"q2" -> "q2" [label="a, b"]' in text
 
 
@@ -103,7 +103,7 @@ def test_dot_escapes_quotes():
 
 
 def test_tikz_uses_the_automata_library_idiom(demo):
-    text = to_tikz(demo.automaton, demo.layout)
+    text = to_tikz(demo.as_dfa(), demo.layout)
     assert r"\begin{tikzpicture}" in text
     assert "state, initial" in text
     assert "accepting" in text
@@ -112,7 +112,7 @@ def test_tikz_uses_the_automata_library_idiom(demo):
 
 def test_tikz_flips_the_y_axis(demo):
     """The canvas's y grows downward; TikZ's grows up."""
-    text = to_tikz(demo.automaton, demo.layout)
+    text = to_tikz(demo.as_dfa(), demo.layout)
     rows = {}
     for line in text.splitlines():
         if line.strip().startswith(r"\node"):
@@ -131,13 +131,13 @@ def test_tikz_escapes_latex_specials():
 
 
 def test_tikz_standalone_compiles_as_a_document(demo):
-    text = to_tikz(demo.automaton, demo.layout, standalone=True)
+    text = to_tikz(demo.as_dfa(), demo.layout, standalone=True)
     assert text.startswith(r"\documentclass")
     assert r"\end{document}" in text.rstrip().splitlines()[-1]
 
 
 def test_tikz_caption_wraps_a_figure(demo):
-    text = to_tikz(demo.automaton, demo.layout, caption="Recognises a*b+")
+    text = to_tikz(demo.as_dfa(), demo.layout, caption="Recognises a*b+")
     assert r"\begin{figure}" in text
     assert "Recognises a*b+" in text
 
@@ -148,29 +148,29 @@ def test_tikz_caption_wraps_a_figure(demo):
 
 
 def test_svg_is_valid_xml(demo):
-    root = ET.fromstring(to_svg(demo.automaton, demo.layout))
+    root = ET.fromstring(to_svg(demo.as_dfa(), demo.layout))
     assert root.tag == f"{SVG_NS}svg"
 
 
 def test_svg_draws_one_circle_per_state_plus_accept_rings(demo):
-    root = ET.fromstring(to_svg(demo.automaton, demo.layout))
+    root = ET.fromstring(to_svg(demo.as_dfa(), demo.layout))
     circles = root.findall(f"{SVG_NS}circle")
-    assert len(circles) == len(demo.automaton.states) + len(demo.automaton.accept)
+    assert len(circles) == len(demo.as_dfa().states) + len(demo.as_dfa().accept)
 
 
 def test_svg_places_states_where_the_layout_says(demo):
     """This is the exporter that must match the screen."""
-    root = ET.fromstring(to_svg(demo.automaton, demo.layout))
+    root = ET.fromstring(to_svg(demo.as_dfa(), demo.layout))
     drawn = {(round(float(c.get("cx"))), round(float(c.get("cy"))))
              for c in root.findall(f"{SVG_NS}circle")}
-    for state in demo.automaton.states:
+    for state in demo.as_dfa().states:
         x, y = demo.layout.position_of(state)
         assert (round(x), round(y)) in drawn, f"{state} not drawn at its position"
 
 
 def test_svg_edges_use_the_same_geometry_as_the_renderer(demo):
     """Not similar geometry -- the same function, so they cannot drift."""
-    root = ET.fromstring(to_svg(demo.automaton, demo.layout))
+    root = ET.fromstring(to_svg(demo.as_dfa(), demo.layout))
     paths = [p.get("d") for p in root.findall(f"{SVG_NS}path")]
 
     expected = geometry.edge_path(demo.layout.position_of("q0"),
@@ -181,22 +181,22 @@ def test_svg_edges_use_the_same_geometry_as_the_renderer(demo):
 
 
 def test_svg_viewbox_contains_everything(demo):
-    root = ET.fromstring(to_svg(demo.automaton, demo.layout))
+    root = ET.fromstring(to_svg(demo.as_dfa(), demo.layout))
     min_x, min_y, width, height = (float(v) for v in root.get("viewBox").split())
 
-    for state in demo.automaton.states:
+    for state in demo.as_dfa().states:
         x, y = demo.layout.position_of(state)
         assert min_x <= x - 30 and x + 30 <= min_x + width
         assert min_y <= y - 30 and y + 30 <= min_y + height
 
 
 def test_svg_marks_the_state_kinds_differently(demo):
-    root = ET.fromstring(to_svg(demo.automaton, demo.layout))
+    root = ET.fromstring(to_svg(demo.as_dfa(), demo.layout))
     strokes = {c.get("stroke") for c in root.findall(f"{SVG_NS}circle")}
     assert len(strokes) >= 3, "normal, accepting and trap must differ"
     assert any(c.get("stroke-dasharray")
                for c in ET.fromstring(
-                   to_svg(demo.automaton.with_state("island"), demo.layout)
+                   to_svg(demo.as_dfa().with_state("island"), demo.layout)
                ).findall(f"{SVG_NS}circle")), "unreachable is dashed"
 
 
@@ -208,7 +208,7 @@ def test_svg_escapes_markup():
 
 
 def test_svg_title_is_included(demo):
-    root = ET.fromstring(to_svg(demo.automaton, demo.layout, title="Demo"))
+    root = ET.fromstring(to_svg(demo.as_dfa(), demo.layout, title="Demo"))
     assert root.find(f"{SVG_NS}title").text == "Demo"
 
 

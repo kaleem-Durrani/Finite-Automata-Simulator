@@ -1,7 +1,7 @@
 """The run panel: where a run is in the input, and the controls that move it.
 
-Position counter, progress bar, current state, what the next step will do, the
-four transport buttons, the keyboard hint and the step-speed slider -- one
+Position counter, progress bar, current configuration, what the next step will
+do, the four transport buttons, the keyboard hint and the step-speed slider -- one
 stack, measured down from the panel header, because mixing the two directions
 is how the hint and the playback row ended up drawn on top of each other.
 
@@ -10,9 +10,14 @@ arguments. Nothing here reads the manager. The rectangles come from the
 :class:`LayoutSpec` the caller passes in, which is the same object hit-testing
 reads, so a transport button cannot be drawn in one place and clicked in
 another.
+
+A position in a run is a *set* of states. That is not a concession to
+nondeterminism bolted on afterwards: a deterministic run's configuration is a
+set of one, so there is a single shape here and a single code path, and the
+panel cannot report a machine standing somewhere it is not.
 """
 
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, FrozenSet, Iterable, Optional, Sequence, Tuple
 
 import pygame
 
@@ -24,13 +29,69 @@ from ui.widgets import cross as cross_icon
 from ui.widgets import pause as pause_icon
 from ui.widgets import play as play_icon
 
+#: What each verdict says on the panel's one detail line.
+#:
+#: Keyed on the verdict's string value, not the enum, because nothing under
+#: ``ui/`` imports the engine. The wording matters more than the lookup: the
+#: line used to be the enum name with its underscores stripped, so a run that
+#: halted read "reject no transition" -- true of a DFA with a missing arrow,
+#: and a lie about an NFA, which had plenty of arrows and simply watched every
+#: branch die. "Ran out of moves" is true of both, so there is one sentence
+#: rather than two that have to be kept in agreement.
+_VERDICT_WORDING = {
+    "accept": "accepted",
+    "reject_non_accepting": "read to the end, not accepting",
+    "reject_no_transition": "ran out of moves",
+    "reject_symbol_not_in_alphabet": "symbol not in the alphabet",
+    "no_initial_state": "no initial state, so no run",
+}
+
+
+def show_configuration(configuration: Iterable[str]) -> str:
+    """A configuration as the panel says it.
+
+    One state reads as itself -- a deterministic run stands *in q1*, and
+    wrapping that in braces would make the ordinary case pay for the rare one.
+    Two or more read as the set they are, ``{q0, q2}``, because that is what
+    the machine is doing and there is no honest way to name one of them.
+
+    Sorted, always: a frozenset iterates in an order that changes between
+    processes, and a panel that reads differently on every run is a panel
+    nobody can compare against a diagram (docs/LESSONS.md).
+    """
+    states = sorted(configuration)
+    if not states:
+        return "-"
+    if len(states) == 1:
+        return states[0]
+    return "{" + ", ".join(states) + "}"
+
+
+def verdict_line(run: Any) -> str:
+    """How the run ended, in the few words the panel has room for.
+
+    Public alongside :func:`show_configuration` for the same reason: these two
+    are the panel's wording, the wording is a decision, and a decision that is
+    only readable off a rendered surface is a decision nothing can test.
+    """
+    verdict = getattr(run, "verdict", None)
+    value = str(getattr(verdict, "value", verdict or ""))
+    text = _VERDICT_WORDING.get(value, value.replace("_", " "))
+
+    # The symbol that stopped it, when one did. "Ran out of moves" without
+    # saying on what leaves the user counting characters on the tape.
+    symbol = getattr(run, "offending_symbol", None)
+    if symbol is not None:
+        text = f"{text}: '{symbol}' at {getattr(run, 'stopped_at', '?')}"
+    return text
+
 
 def draw_run_panel(chrome: Chrome, *,
                    panel: Optional[pygame.Rect],
                    layout: LayoutSpec,
                    execution_active: bool,
                    execution_step: int,
-                   execution_path: Sequence[str],
+                   configurations: Sequence[FrozenSet[str]],
                    run: Optional[Any] = None,
                    animation_active: bool = False,
                    animation_speed: int = 1000,
@@ -52,8 +113,11 @@ def draw_run_panel(chrome: Chrome, *,
             frame where the column has no run panel in it.
         execution_active: Whether execution visualization is active
         execution_step: Position in the run
-        execution_path: States visited
-        run: The engine's record of the run, if there is one
+        configurations: Where the machine stood at each position -- a set of
+            states per position, a set of one for a deterministic run.
+        run: The engine's record of the run, if there is one. Either
+            simulator's; only ``steps``, ``verdict``, ``offending_symbol`` and
+            ``stopped_at`` are read, and both records carry all four.
         animation_active: Whether playback is running, which decides whether
             the middle transport button offers play or pause.
         animation_speed: Milliseconds per step, for the slider.
@@ -84,7 +148,7 @@ def draw_run_panel(chrome: Chrome, *,
     x = body.x + chrome.space.md
     y = body.y + 2
 
-    total_steps = max(0, len(execution_path) - 1)
+    total_steps = max(0, len(configurations) - 1)
     position = f"{execution_step} / {total_steps}"
     pos_surface = chrome.fonts.ui("small_strong").render(position, True,
                                                          palette.text_muted)
@@ -99,19 +163,22 @@ def draw_run_panel(chrome: Chrome, *,
                            int(track.width * execution_step / total_steps), 4)
         primitives.panel(chrome.screen, done, palette.accent, radius=2)
 
-    current_state = (execution_path[execution_step]
-                     if execution_step < len(execution_path) else "-")
+    current = (configurations[execution_step]
+               if execution_step < len(configurations) else frozenset())
     state_line = chrome.fonts.ui("body_strong").render(
-        f"in {current_state}", True, palette.text)
+        f"in {show_configuration(current)}", True, palette.text)
     chrome.screen.blit(state_line, (x, y + 32))
 
     steps = getattr(run, "steps", ()) or ()
-    verdict = getattr(run, "verdict", None)
     if execution_step < len(steps):
-        step = steps[execution_step]
-        detail = f"next: read '{step.symbol}' to {step.target}"
-    elif verdict is not None:
-        detail = str(verdict.value).replace("_", " ")
+        # The destination is read out of ``configurations`` rather than off the
+        # step, because a DFA step names one state and an NFA step names a set.
+        # The caller has already made those the same shape; asking the step
+        # would put an isinstance check in a panel.
+        detail = (f"next: read '{steps[execution_step].symbol}' to "
+                  f"{show_configuration(configurations[execution_step + 1])}")
+    elif getattr(run, "verdict", None) is not None:
+        detail = verdict_line(run)
     else:
         detail = "run complete"
     chrome.screen.blit(

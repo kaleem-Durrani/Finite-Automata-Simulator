@@ -204,8 +204,33 @@ def test_the_empty_word_prints_as_epsilon(tmp_path):
     assert out.strip() == "ε"
 
 
-# ---------------------------------------------------------------------------
-# export
+def test_epsilon_falls_back_where_the_terminal_cannot_encode_it(tmp_path):
+    """A Windows console still defaults to a code page with no Greek in it, so
+    printing the character raised UnicodeEncodeError partway through the output
+    -- ``fsa sample`` aborted with a traceback on any machine that accepts the
+    empty word. Asked of the stream, so a pipe or a UTF-8 terminal is
+    unaffected."""
+    document = Document().add_symbol("a")
+    document, q0 = document.add_state((0.0, 0.0))
+    document = document.toggle_accept(q0)
+
+    # `sample` writes the empty word as epsilon; `show` heads the epsilon
+    # column with it. The second machine has to be a separate file: an epsilon
+    # move is what `show` is being asked to print, and it is also what stops a
+    # DFA-only verb like `sample` running at all.
+    plain = tmp_path / "empty-word.json"
+    serialize.save(document, str(plain))
+    moving = tmp_path / "epsilon-move.json"
+    serialize.save(document.add_transition(q0, None, q0), str(moving))
+
+    for argv in (["sample", str(plain)], ["show", str(moving)]):
+        raw = io.BytesIO()
+        out = io.TextIOWrapper(raw, encoding="cp1252", newline="")
+        assert main(argv, out=out, err=io.StringIO()) == OK
+        out.flush()
+
+        text = raw.getvalue().decode("cp1252")
+        assert "eps" in text and "ε" not in text
 # ---------------------------------------------------------------------------
 
 

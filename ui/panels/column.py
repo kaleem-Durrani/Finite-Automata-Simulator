@@ -63,7 +63,17 @@ def panel_frame(chrome: Chrome, *, key: str, rect: pygame.Rect,
     return body if body.height > 6 else None
 
 
-def draw_status(chrome: Chrome, *, rect: pygame.Rect, automaton: "fsa.DFA",
+def _deterministic(automaton: "fsa.AnyAutomaton") -> bool:
+    """Whether the machine has one target per (state, symbol) and no epsilon.
+
+    A `DFA` value is deterministic by construction; only an `NFA` has to be
+    asked.
+    """
+    checker = getattr(automaton, "is_deterministic", None)
+    return True if checker is None else bool(checker())
+
+
+def draw_status(chrome: Chrome, *, rect: pygame.Rect, automaton: "fsa.AnyAutomaton",
                 warn_no_accepting: bool, collapsed: bool, layout: LayoutSpec,
                 mouse_pos: Optional[Tuple[int, int]] = None) -> None:
     """Draw status information about the current automaton."""
@@ -82,6 +92,11 @@ def draw_status(chrome: Chrome, *, rect: pygame.Rect, automaton: "fsa.DFA",
          else "empty", not automaton.alphabet),
         ("Start", automaton.initial or "none", automaton.initial is None),
         ("Accepting", str(len(automaton.accept)), warn_no_accepting),
+        # Stated, not flagged. A nondeterministic machine is a legal thing
+        # to have drawn, and this codebase has already learned once what
+        # happens when a design choice is labelled a fault with a button
+        # beside it -- see docs/LESSONS.md.
+        ("Kind", "DFA" if _deterministic(automaton) else "NFA", False),
     ]
 
     label_font = chrome.fonts.ui("small")
@@ -109,7 +124,7 @@ def draw_status(chrome: Chrome, *, rect: pygame.Rect, automaton: "fsa.DFA",
 
 
 def draw_legend(chrome: Chrome, *, rect: Optional[pygame.Rect],
-                automaton: "fsa.DFA", legend_dead: bool,
+                automaton: "fsa.AnyAutomaton", legend_dead: bool,
                 legend_unreachable: bool, collapsed: bool, layout: LayoutSpec,
                 mouse_pos: Optional[Tuple[int, int]] = None) -> None:
     """Explain the state styles, showing only the kinds actually present.

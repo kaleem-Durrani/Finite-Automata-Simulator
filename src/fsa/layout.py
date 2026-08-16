@@ -21,13 +21,23 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from fsa.automaton import DFA
+from fsa.nfa import NFA
 from fsa.symbols import StateId
 
 Point = Tuple[float, float]
 Edge = Tuple[StateId, StateId]
+
+#: Either machine, for the few places that read only what both expose:
+#: ``states``, ``initial``, ``accept``, ``alphabet``, ``labels`` and
+#: ``grouped_transitions``. Placement is one of them -- where a state is drawn
+#: cannot depend on how many targets its moves have -- and
+#: :class:`fsa.document.Document` is the other, which is why the alias lives
+#: here: layout is the lowest module that needs it, and the document already
+#: depends on layout, so putting it the other way round would be a cycle.
+AnyAutomaton = Union[DFA, NFA]
 
 _EMPTY_POSITIONS: Mapping[StateId, Point] = MappingProxyType({})
 _EMPTY_ARCS: Mapping[Edge, float] = MappingProxyType({})
@@ -223,7 +233,7 @@ class Layout:
         return Layout(placed)
 
     @staticmethod
-    def auto(automaton: DFA,
+    def auto(automaton: AnyAutomaton,
              algorithm: str = "bfs_layers",
              origin: Point = (160.0, 160.0),
              minimum_separation: float = AUTO_SEPARATION) -> "Layout":
@@ -322,7 +332,7 @@ class Layout:
 # ----------------------------------------------------------------------
 
 
-def _bfs_layers(automaton: DFA) -> Tuple[Tuple[StateId, ...], ...]:
+def _bfs_layers(automaton: AnyAutomaton) -> Tuple[Tuple[StateId, ...], ...]:
     """The reachable states, grouped by their BFS distance from the initial one.
 
     Empty when there is no initial state: then nothing has a distance, and the

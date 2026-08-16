@@ -18,7 +18,7 @@ from fsa import geometry
 from rendering import primitives
 from rendering.camera import Camera
 from rendering.fonts import FontBook
-from rendering.scene import EdgeVisual, NodeKind, NodeVisual, Scene
+from rendering.scene import EdgeVisual, NodeKind, NodeVisual, Scene, TokenVisual
 from rendering.theme import Theme
 
 Point = Tuple[float, float]
@@ -113,8 +113,11 @@ class Renderer:
         for node in visible_nodes:
             self._draw_node_label(node)
 
-        if scene.token is not None:
-            self._draw_token(scene.token)
+        # Tokens last and all of them: a nondeterministic move puts one on
+        # every branch, and none of them may be hidden behind a node -- the
+        # whole point of drawing several is that the viewer counts them.
+        for token in scene.tokens:
+            self._draw_token(token)
 
     # ------------------------------------------------------------------
     # Culling
@@ -325,8 +328,14 @@ class Renderer:
     # Execution
     # ------------------------------------------------------------------
 
-    def _draw_token(self, token) -> None:
-        """The read head: a bright dot with a fading tail behind it."""
+    def _draw_token(self, token: TokenVisual) -> None:
+        """One read head: a bright dot with a fading tail behind it.
+
+        Drawn identically however many there are. Tinting or numbering the
+        branches was considered and dropped: the branches of a nondeterministic
+        move are not ranked, and colouring them differently would suggest an
+        order the machine does not have.
+        """
         palette = self.theme.palette
         zoom = self.camera.zoom
         radius = max(3.0, token.radius * zoom)

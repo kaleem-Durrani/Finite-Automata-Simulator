@@ -190,7 +190,7 @@ def test_sample_language_matches_the_verified_demo_table():
     this pins the same six words against the sampler."""
     import main as main_module
 
-    automaton = main_module.demo_document().automaton
+    automaton = main_module.demo_document().as_dfa()
     accepted = language.sample_language(automaton, limit=6, max_length=3)
     assert accepted == ["b", "ab", "bb", "aab", "abb", "bbb"]
     for word in accepted:

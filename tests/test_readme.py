@@ -27,7 +27,7 @@ def demo():
 
 def expected_table(rows: int = 6) -> str:
     """Build the table the README should contain, from the tool itself."""
-    automaton = demo().automaton
+    automaton = demo().as_dfa()
     accepted = language.sample_language(automaton, rows)
     rejected = language.sample_rejected(automaton, rows)
 
@@ -58,7 +58,7 @@ def test_the_readme_examples_match_the_tool():
 
 def test_the_demo_language_is_what_the_readme_claims():
     """The prose says a*b+. Check that against the machine, not against itself."""
-    automaton = demo().automaton
+    automaton = demo().as_dfa()
     import fsa
 
     for word in ("b", "ab", "aab", "bbb", "abb"):

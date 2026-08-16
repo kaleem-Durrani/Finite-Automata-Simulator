@@ -154,7 +154,24 @@ def test_make_trap_loops_every_symbol():
 
     assert state not in document.automaton.accept
     for symbol in ("a", "b"):
-        assert document.automaton.target(state, symbol) == state
+        assert document.automaton.targets(state, symbol) == {state}
+
+
+def test_make_trap_leaves_no_way_out():
+    """Adding the loops is not enough now that transitions add rather than
+    replace: a branch to somewhere else, or an epsilon move, would survive
+    beside the loop and the "trap" could still be left."""
+    document = Document().add_symbol("a")
+    document, trap = document.add_state((0.0, 0.0))
+    document, escape = document.add_state((200.0, 0.0))
+    document = (document.toggle_accept(escape)
+                        .add_transition(trap, "a", escape)
+                        .add_transition(trap, None, escape)
+                        .make_trap(trap))
+
+    assert document.automaton.targets(trap, "a") == {trap}
+    assert document.automaton.targets(trap, None) == frozenset()
+    assert fsa.dead_states(document.as_dfa()) == frozenset({trap})
 
 
 def test_removing_the_last_symbol_on_an_edge_drops_its_arc():
@@ -317,10 +334,10 @@ def test_the_legacy_dead_end_flag_is_dropped():
     the edges, not from the flag.
     """
     document = serialize.from_dict(LEGACY)
-    assert fsa.dead_states(document.automaton) == frozenset({"q2"})
+    assert fsa.dead_states(document.as_dfa()) == frozenset({"q2"})
 
-    escaped = document.add_transition("q2", "1", "q1")
-    assert fsa.dead_states(escaped.automaton) == frozenset()
+    escaped = document.remove_transition("q2", "1").add_transition("q2", "1", "q1")
+    assert fsa.dead_states(escaped.as_dfa()) == frozenset()
 
 
 def test_a_legacy_flag_that_contradicts_the_edges_is_ignored():
@@ -329,7 +346,7 @@ def test_a_legacy_flag_that_contradicts_the_edges_is_ignored():
     data["dead_end_states"] = ["q2"]
 
     document = serialize.from_dict(data)
-    assert fsa.accepts(document.automaton, "00"), "delta says accepted"
+    assert fsa.accepts(document.as_dfa(), "00"), "delta says accepted"
 
 
 def test_file_helpers_report_failures_rather_than_raising(tmp_path):

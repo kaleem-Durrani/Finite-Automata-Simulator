@@ -32,6 +32,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from fsa import DFA, Document, Layout, serialize
+from fsa.errors import NondeterministicError
 from fsa.nfa import EPSILON, NFA, from_dfa
 from fsa.serialize import DocumentFormatError
 from tests.strategies import dfas, nfas
@@ -223,8 +224,7 @@ def test_the_example_file_also_opens_as_an_nfa():
     """Every DFA is an NFA, so the version 3 door opens every older file too."""
     automaton, layout, next_id = serialize.load_nfa(
         str(EXAMPLES / "simple_binary.json"))
-    assert automaton == from_dfa(
-        serialize.load(str(EXAMPLES / "simple_binary.json")).automaton)
+    assert automaton == serialize.load(str(EXAMPLES / "simple_binary.json")).automaton
     assert set(layout.positions) == {"q0", "q1", "q2"}
     assert next_id == 3
 
@@ -299,7 +299,7 @@ def test_the_envelope_has_the_same_keys_as_version_2():
     document = golden_document()
     two = json.loads(serialize.dumps(document))
     three = json.loads(serialize.dumps_nfa(
-        from_dfa(document.automaton), document.layout, document.next_id))
+        document.automaton, document.layout, document.next_id))
     assert list(two) == list(three)
     assert list(two["automaton"]) == list(three["automaton"])
     assert list(two["layout"]) == list(three["layout"])
@@ -491,46 +491,48 @@ def test_a_file_with_no_coordinates_is_left_without_them():
 
 
 def test_a_deterministic_version_3_file_opens_as_a_document():
-    """A Document holds a DFA until Phase 12b, and a version 3 file whose
-    machine happens to be deterministic is an ordinary thing to write."""
     automaton = (NFA().with_states(["q0", "q1"])
                  .with_transition("q0", "a", "q1")
                  .with_accept("q1"))
     document = serialize.loads(
         serialize.dumps_nfa(automaton, drawn(automaton), 2))
-    assert document.automaton.target("q0", "a") == "q1"
+    assert document.as_dfa().target("q0", "a") == "q1"
     assert document.automaton.accept == frozenset({"q1"})
 
 
-def test_a_nondeterministic_version_3_file_is_refused_as_a_document():
-    """Refused, not determinised: opening a file should not show a machine with
-    different states from the one that was saved."""
+def test_a_nondeterministic_version_3_file_opens_as_a_document_too():
+    """It used to be refused, because a document could only hold a DFA. Now the
+    machine in the file is the machine in the document, which is the only
+    reading that does not either lose it or quietly show a different one."""
     automaton = branching()
-    with pytest.raises(DocumentFormatError, match="nondeterministic"):
-        serialize.loads(serialize.dumps_nfa(automaton, drawn(automaton), 3))
+    document = serialize.loads(serialize.dumps_nfa(automaton, drawn(automaton), 3))
+    assert document.automaton == automaton
+    assert not document.is_deterministic
 
 
-def test_the_refusal_names_the_state_that_caused_it():
+def test_the_refusal_moves_to_as_dfa_and_still_names_the_state():
     """"This machine is nondeterministic" is not actionable; "q0 has 2 targets
-    on 'a'" is."""
+    on 'a'" is. The file opens; asking it for a DFA is what fails."""
     automaton = (NFA().with_states(["q0", "q1", "q2"])
                  .with_transition("q0", "a", "q1")
                  .with_transition("q0", "a", "q2"))
-    with pytest.raises(DocumentFormatError, match=r"q0 has 2 targets on 'a'"):
-        serialize.loads(serialize.dumps_nfa(automaton, drawn(automaton), 3))
+    document = serialize.loads(serialize.dumps_nfa(automaton, drawn(automaton), 3))
+    with pytest.raises(NondeterministicError, match=r"q0 has 2 targets on 'a'"):
+        document.as_dfa()
 
 
-def test_an_epsilon_move_alone_is_enough_to_refuse_a_document():
+def test_an_epsilon_move_alone_is_enough_to_refuse_a_dfa_view():
     automaton = (NFA().with_states(["q0", "q1"])
                  .with_transition("q0", EPSILON, "q1"))
-    with pytest.raises(DocumentFormatError, match="epsilon"):
-        serialize.loads(serialize.dumps_nfa(automaton, drawn(automaton), 2))
+    document = serialize.loads(serialize.dumps_nfa(automaton, drawn(automaton), 2))
+    with pytest.raises(NondeterministicError, match="epsilon"):
+        document.as_dfa()
 
 
 def test_a_version_2_file_opens_as_an_nfa():
     document = golden_document()
     automaton, layout, next_id = serialize.loads_nfa(serialize.dumps(document))
-    assert automaton == from_dfa(document.automaton)
+    assert automaton == document.automaton
     assert layout == document.layout
     assert next_id == document.next_id
 
@@ -544,7 +546,7 @@ def test_a_dfa_written_as_version_3_comes_back_the_same_dfa(automaton: DFA):
     that treated a missing entry as a defect would refuse most real files."""
     text = serialize.dumps_nfa(from_dfa(automaton), Layout.auto(automaton),
                                len(automaton.states))
-    assert serialize.loads(text).automaton == automaton
+    assert serialize.loads(text).as_dfa() == automaton
     assert serialize.loads_nfa(text)[0] == from_dfa(automaton)
 
 

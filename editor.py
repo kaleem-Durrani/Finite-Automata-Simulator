@@ -12,6 +12,13 @@ by surprise -- and every replacement goes through one method, which drops any
 pointer that no longer names a live state.
 
 No pygame. This is testable without a display.
+
+The document holds an ``NFA``, always -- see :mod:`fsa.document`. Nothing here
+may assume one target per ``(state, symbol)``, and everything that needs a DFA
+asks the document for :meth:`~fsa.document.Document.as_dfa` behind a check.
+This file runs inside a 60fps loop, so an exception raised here is a window
+that closes while someone is drawing; the DFA-only readings degrade to "no
+answer" instead.
 """
 
 from dataclasses import dataclass
@@ -24,6 +31,16 @@ from fsa import Document, Layout, Point, StateId
 #: so 200 entries is cheap -- the cap exists to bound a marathon session, not
 #: because entries are expensive.
 UNDO_DEPTH = 200
+
+#: How an epsilon move is named in the phrases undo reports. The engine spells
+#: it ``None`` and a file spells it ``null``; neither is a thing to show a
+#: person in "undo transition q0 -None-> q1".
+EPSILON_LABEL = "ε"
+
+
+def _shown(symbol: Optional[str]) -> str:
+    """A transition symbol as it appears in a phrase shown to the user."""
+    return EPSILON_LABEL if symbol is None else symbol
 
 
 @dataclass
@@ -168,8 +185,19 @@ class EditorModel:
     # ------------------------------------------------------------------
 
     @property
-    def automaton(self) -> fsa.DFA:
+    def automaton(self) -> fsa.NFA:
         return self.document.automaton
+
+    @property
+    def is_deterministic(self) -> bool:
+        """Whether the machine on the canvas is a DFA.
+
+        A fact the interface reports, never a defect it flags. Exposed here so
+        that a panel or a menu item can ask without reaching through two
+        objects for it, and so there is one place to look when wondering what
+        the editor does differently for a nondeterministic machine.
+        """
+        return self.document.is_deterministic
 
     @property
     def layout(self) -> Layout:
@@ -310,34 +338,50 @@ class EditorModel:
     def set_initial(self, state: Optional[StateId]) -> None:
         self.apply(self.document.set_initial(state), action=f"start at {state}")
 
-    def add_transition(self, source: StateId, symbol: str, target: StateId,
-                       arc: float = 0.0) -> bool:
-        """Define a transition. False if either state is gone.
+    def add_transition(self, source: StateId, symbol: Optional[str],
+                       target: StateId, arc: float = 0.0) -> bool:
+        """Add a transition. False if either state is gone.
 
         Reported rather than raised: the states can disappear between a gesture
         starting and finishing, and that is the user deleting something, not a
         programming error.
+
+        An existing move on the same symbol is **kept**: this adds a branch
+        rather than replacing one, so drawing a second arrow leaves two arrows.
+        ``symbol`` may be ``None``, for a move that reads nothing.
         """
         states = self.document.automaton.states
         if source not in states or target not in states:
             return False
         self.apply(self.document.add_transition(source, symbol, target, arc),
-                   action=f"transition {source} -{symbol}-> {target}")
+                   action=f"transition {source} -{_shown(symbol)}-> {target}")
         return True
 
-    def remove_transition(self, source: StateId, symbol: str) -> None:
-        self.apply(self.document.remove_transition(source, symbol),
-                   action=f"remove {source} -{symbol}->")
+    def remove_transition(self, source: StateId, symbol: Optional[str],
+                          target: Optional[StateId] = None) -> None:
+        """Remove one branch of a move, or every branch of it.
+
+        ``target`` says which arrow the user pointed at. Without it every
+        target on that symbol goes, which is the only thing a caller holding
+        just a ``(state, symbol)`` pair can mean -- and was the only possible
+        meaning while delta had one target.
+        """
+        self.apply(self.document.remove_transition(source, symbol, target),
+                   action=f"remove {source} -{_shown(symbol)}->")
 
     def make_trap(self, state: StateId) -> Tuple[bool, int]:
         """Loop every symbol back to a state. Returns success and how many
-        existing transitions were replaced."""
+        existing moves out of it were replaced.
+
+        Counted per symbol, epsilon included, because that is what the user
+        sees disappear: a symbol whose only target was already this state is
+        not a change, and one that led anywhere else is.
+        """
         automaton = self.document.automaton
         if state not in automaton.states or not automaton.alphabet:
             return False, 0
-        replaced = sum(
-            1 for symbol in automaton.alphabet
-            if automaton.target(state, symbol) not in (None, state))
+        replaced = sum(1 for targets in automaton.outgoing(state).values()
+                       if targets - {state})
         self.apply(self.document.make_trap(state), action=f"trap {state}")
         return True, replaced
 
@@ -361,17 +405,32 @@ class EditorModel:
         Recomputed only when the automaton value changes -- which, because it is
         immutable, is a cheap identity check rather than a dirty flag someone
         has to remember to set.
+
+        The first two are DFA facts: :func:`fsa.analysis.reachable` and
+        :func:`fsa.analysis.co_reachable` both walk a delta with one target per
+        pair. On a nondeterministic machine they are reported as empty --
+        nothing is greyed out and nothing is hatched -- rather than guessed at
+        or raised. An empty answer says "not known here", which is true; a
+        wrong one would put a hatch on a state that is perfectly alive, and
+        this program has already learned what happens when the drawing and the
+        analysis disagree.
         """
         automaton = self.document.automaton
         cached = getattr(self, "_cached_analysis", None)
         if cached is not None and cached[0] is automaton:
             return cached[1]
 
-        unreachable = fsa.unreachable_states(automaton)
-        # With no accepting state every state is technically a trap. True, and
-        # useless: it greys the whole canvas out while the user is still
-        # drawing. The absence of accepting states is reported on its own.
-        dead = fsa.dead_states(automaton) if automaton.accept else frozenset()
+        if self.document.is_deterministic:
+            deterministic = self.document.as_dfa()
+            unreachable = fsa.unreachable_states(deterministic)
+            # With no accepting state every state is technically a trap. True,
+            # and useless: it greys the whole canvas out while the user is
+            # still drawing. The absence of accepting states is reported on its
+            # own.
+            dead = (fsa.dead_states(deterministic) if automaton.accept
+                    else frozenset())
+        else:
+            dead = unreachable = frozenset()
         result = (dead, unreachable, bool(automaton.accept))
 
         self._cached_analysis = (automaton, result)
@@ -383,6 +442,17 @@ class EditorModel:
         Cached on the automaton value like :meth:`analysis`, because the
         diagnostics panel reads this every frame and reverse-reachability every
         16ms would be paying for the same answer over and over.
+
+        Nothing is listed for a nondeterministic machine. Every defect
+        :func:`fsa.analysis.defects` knows about -- an incomplete delta, dead
+        states, unreachable states -- is a statement about a transition
+        *function*, and none of them can be computed here without first
+        determinizing, which would describe a machine that is not the one on
+        screen. Nondeterminism itself is emphatically not added to the list:
+        it is a legal design choice, and this codebase has been burned once
+        already by putting a Fix button next to one (docs/LESSONS.md, the
+        complete/trim cycle). The panel simply has nothing to say, which is
+        honest; the status panel still warns when no state accepts.
         """
         automaton = self.document.automaton
         cached = getattr(self, "_cached_defects", None)
@@ -390,6 +460,7 @@ class EditorModel:
             result: Tuple[fsa.Defect, ...] = cached[1]
             return result
 
-        found = fsa.defects(automaton)
+        found = (fsa.defects(self.document.as_dfa())
+                 if self.document.is_deterministic else ())
         self._cached_defects = (automaton, found)
         return found

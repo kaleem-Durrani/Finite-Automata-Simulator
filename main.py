@@ -9,7 +9,18 @@ its own -- that is all in :mod:`fsa` -- and no drawing logic -- that is all in
 
 import os
 import sys
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import pygame
 
@@ -30,7 +41,7 @@ if os.path.isdir(_SRC) and _SRC not in sys.path:
 # Everything below imports after the path bootstrap above, deliberately.
 import fsa
 import fsa.document
-from editor import EditorModel
+from editor import EPSILON_LABEL, EditorModel
 from fsa import Document, geometry, serialize
 from rendering.animation import Animated, AnimatedPoint, Track, ease_in_out, ease_out_back
 from rendering.fonts import FontBook
@@ -49,6 +60,13 @@ from ui import events
 from ui.context_menu import SEPARATOR, MenuItem
 from ui.ui_manager import UIManager
 
+
+def _shown_symbol(symbol: Optional[str]) -> str:
+    """A palette symbol as it appears in a message. ``None`` is the epsilon
+    move, which the engine spells as nothing at all and a person does not."""
+    return EPSILON_LABEL if symbol is None else symbol
+
+
 #: Symbols a brand-new document starts with, so the palette is never empty.
 STARTING_ALPHABET = ("a", "b")
 
@@ -59,6 +77,91 @@ TOOL_HINTS = {
     "pan": "Hand: drag anywhere to move the view",
     "transition": "Transition: click a state, then its target",
 }
+
+
+def _label_order(symbol: Optional[str]) -> Tuple[int, str]:
+    """Sort key for the symbols on one drawn edge, epsilon first.
+
+    ``sorted`` alone raises on these: an edge's symbol set may hold ``None``,
+    and ``None`` does not compare with ``str``. The order matches
+    :meth:`fsa.nfa.NFA.sorted_transitions` -- the move that costs nothing comes
+    first -- so an edge's label reads in the same order as the file and the
+    transition table.
+    """
+    return (0, "") if symbol is None else (1, symbol)
+
+
+#: Either simulator's record of a run. The two are separate types because a
+#: DFA step names one state and an NFA step names a set; only the four fields
+#: the UI reads -- ``steps``, ``verdict``, ``offending_symbol``, ``stopped_at``
+#: -- are common, and nothing outside :meth:`AutomatonSimulator._test_string`
+#: is allowed to care which one it has.
+AnyRun = Union[fsa.Run, fsa.nfa.NfaRun]
+
+
+@dataclass(frozen=True, slots=True)
+class RunPosition:
+    """One position in a run: where the machine stands, and how it got there.
+
+    A *set* of states, always. A deterministic machine's configuration is a set
+    of one, so there is one shape for both simulators and one animation path
+    that reads it -- rather than a nondeterministic branch bolted alongside the
+    old single-state one, which would be two things to keep in step and a
+    frame loop that behaves differently depending on which it took.
+
+    The edges live here beside the configuration rather than in a second list
+    indexed by the same counter. That is the mistake this program keeps
+    relearning: the previous model kept the drawn edges beside the transition
+    table, they fell out of step, and the renderer drew one automaton while the
+    simulator ran another.
+    """
+
+    configuration: FrozenSet[str]
+    """Every state the machine could be in at this position."""
+
+    entered_by: Tuple[Tuple[str, str], ...] = ()
+    """The drawn edges crossed to arrive here, as ``(source, target)`` pairs.
+
+    Empty at position 0, since nothing was crossed to start. One entry for a
+    deterministic move; one per surviving branch for a nondeterministic one,
+    which is what puts a token on each.
+    """
+
+
+def _dfa_trace(result: fsa.Run) -> List[RunPosition]:
+    """A deterministic run as a trace of configurations, each a set of one."""
+    if result.start is None:
+        return []
+    trace = [RunPosition(frozenset({result.start}))]
+    trace.extend(RunPosition(frozenset({step.target}),
+                             ((step.source, step.target),))
+                 for step in result.steps)
+    return trace
+
+
+def _nfa_trace(automaton: fsa.NFA, result: fsa.nfa.NfaRun) -> List[RunPosition]:
+    """A nondeterministic run as a trace of configurations.
+
+    ``entered_by`` holds every edge the machine crossed *reading that symbol*.
+    Epsilon edges are deliberately absent: an epsilon move consumes nothing, so
+    nothing travels along it in time, and animating one would put a token on
+    the tape's clock for a move the tape never sees. The states an epsilon
+    closure reaches still show -- they arrive already lit, inside the
+    configuration, which is exactly what "for free" looks like.
+    """
+    if result.start is None:
+        return []
+    trace = [RunPosition(result.start)]
+    for step in result.steps:
+        # Every branch, from every state the machine was in. Sorted so the
+        # tokens are built in a stable order; a set iterates differently
+        # between processes and a frame that reshuffles is a frame that
+        # flickers.
+        trace.append(RunPosition(step.target, tuple(sorted(
+            (source, target)
+            for source in step.source
+            for target in automaton.targets(source, step.symbol)))))
+    return trace
 
 
 def _maximize_window() -> None:
@@ -130,13 +233,13 @@ class AutomatonSimulator:
         self.fps = 60
 
         # Execution. The run comes from the engine, so a rejection carries a
-        # reason and each step names the edge it took -- which is what the
-        # travelling token animates along.
+        # reason and each step names the edges it took -- which is what the
+        # travelling tokens animate along.
         self.execution_active = False
         self.execution_step = 0
         self.execution_string = ""
-        self.execution_path: List[str] = []
-        self.run_result: Optional[fsa.Run] = None
+        self.execution_trace: List[RunPosition] = []
+        self.run_result: Optional[AnyRun] = None
 
         self.animation_active = False
         self.animation_timer = 0
@@ -359,7 +462,8 @@ class AutomatonSimulator:
             self.editor.select(clicked)
             self.editor.begin_transition(clicked)
             self._show_message(
-                f"Drawing '{self.ui_manager.selected_symbol}' from {clicked}"
+                f"Drawing '{_shown_symbol(self.ui_manager.selected_symbol)}'"
+                f" from {clicked}"
                 " -- click its target")
         elif clicked:
             self.editor.select(clicked)
@@ -392,9 +496,14 @@ class AutomatonSimulator:
         way to remove one was to delete a state.
         """
         source, target = edge
-        symbols = sorted(self.editor.automaton.grouped_transitions().get(edge, ()))
-        items = [MenuItem(f"Remove '{symbol}'",
-                          events.RemoveTransition(source, symbol))
+        symbols = sorted(self.editor.automaton.grouped_transitions().get(edge, ()),
+                         key=_label_order)
+        # The target is part of the request: this menu belongs to one drawn
+        # edge, and on a nondeterministic machine that edge is one branch of
+        # the move. Asking to remove the symbol alone would take the arrows to
+        # every other state with it.
+        items = [MenuItem(f"Remove '{EPSILON_LABEL if symbol is None else symbol}'",
+                          events.RemoveTransition(source, symbol, target))
                  for symbol in symbols]
         # A self-loop stores an arc that no renderer honours, so offering to
         # straighten one promises a change nothing can show.
@@ -499,6 +608,7 @@ class AutomatonSimulator:
             events.PromptCancelled: lambda _e: self._show_message("Cancelled"),
             events.ToggleTheme: lambda _e: self._toggle_theme(),
             events.CompleteAutomaton: lambda _e: self._complete_automaton(),
+            events.DeterminizeAutomaton: lambda _e: self._determinize_automaton(),
             events.MinimizeAutomaton: lambda _e: self._minimize_automaton(),
             events.ShowMarkingTable: lambda _e: self._show_marking_table(),
             events.TrimAutomaton: lambda _e: self._trim_automaton(),
@@ -568,11 +678,18 @@ class AutomatonSimulator:
         self._show_message(f"{event.state} is now the initial state")
 
     def _on_remove_transition(self, event: events.RemoveTransition) -> None:
-        target = self.editor.automaton.target(event.source, event.symbol)
-        self.editor.remove_transition(event.source, event.symbol)
+        # Read before the edit, and read as a set: the message names what
+        # actually went, which on a branching move is one of several arrows.
+        losing = self.editor.automaton.targets(event.source, event.symbol)
+        if event.target is not None:
+            losing = losing & {event.target}
+
+        self.editor.remove_transition(event.source, event.symbol, event.target)
         self._after_edit()
+        symbol = EPSILON_LABEL if event.symbol is None else event.symbol
         self._show_message(
-            f"Removed {event.source} --{event.symbol}--> {target}")
+            f"Removed {event.source} --{symbol}--> "
+            f"{', '.join(sorted(losing)) or 'nothing'}")
 
     def _on_straighten_edge(self, event: events.StraightenEdge) -> None:
         source, target = event.source, event.target
@@ -690,6 +807,25 @@ class AutomatonSimulator:
         self._after_edit()
         self._show_message(f"Redid {action}")
 
+    def _deterministic_view(self, operation: str) -> Optional[fsa.DFA]:
+        """The DFA on the canvas, or ``None`` with the reason already shown.
+
+        Most of the algorithms layer is defined on a transition *function*, and
+        the canvas may now hold a relation. This is the one place the interface
+        finds that out, and it says so in a toast rather than raising: an
+        exception here is a window that closes while somebody is drawing.
+
+        Deliberately not "your machine is broken". Nondeterminism is a legal
+        design choice; the message names what to do about it and moves on.
+        """
+        try:
+            return self.editor.document.as_dfa()
+        except fsa.NondeterministicError:
+            self._show_message(
+                f"{operation} needs a deterministic machine -- determinize it "
+                f"first")
+            return None
+
     def _complete_automaton(self) -> None:
         """One click from "your machine is incomplete" to a total automaton.
 
@@ -698,7 +834,10 @@ class AutomatonSimulator:
         the trap instead of halting -- which is precisely the lesson the
         diagnostics panel is teaching when it flags incompleteness.
         """
-        before = len(fsa.missing_transitions(self.editor.automaton))
+        automaton = self._deterministic_view("Complete")
+        if automaton is None:
+            return
+        before = len(fsa.missing_transitions(automaton))
         document, trap = self.editor.document.complete()
         if trap is None:
             self._show_message("Already complete")
@@ -711,7 +850,7 @@ class AutomatonSimulator:
             f"Added {trap} and routed {before} missing "
             f"transition{'s' if before != 1 else ''} to it")
 
-    def _replace_automaton(self, automaton: fsa.DFA, action: str) -> None:
+    def _replace_automaton(self, automaton: fsa.AnyAutomaton, action: str) -> None:
         """Adopt a machine an algorithm produced, and give it coordinates.
 
         Every construction in the algorithms layer emits states the user never
@@ -728,9 +867,33 @@ class AutomatonSimulator:
         self._after_edit()
         self._fit_to_content()
 
+    def _determinize_automaton(self) -> None:
+        """Replace the machine with an equivalent deterministic one.
+
+        Offered even when the machine is already deterministic, because the
+        subset construction also completes delta -- so it does something, and
+        saying what it did is better than greying the item out and leaving the
+        user to guess why.
+        """
+        automaton = self.editor.automaton
+        if automaton.initial is None:
+            self._show_message("Determinize needs an initial state")
+            return
+
+        before = len(automaton.states)
+        was_deterministic = automaton.is_deterministic()
+        result = fsa.determinize(automaton)
+        self._replace_automaton(result, "determinize")
+        self._show_message(
+            f"Completed delta: {before} states -> {len(result.states)}"
+            if was_deterministic else
+            f"Determinized: {before} states -> {len(result.states)}")
+
     def _minimize_automaton(self) -> None:
         """Merge the states no word can tell apart."""
-        automaton = self.editor.automaton
+        automaton = self._deterministic_view("Minimise")
+        if automaton is None:
+            return
         if automaton.initial is None:
             self._show_message("Minimise needs an initial state")
             return
@@ -752,7 +915,9 @@ class AutomatonSimulator:
         last minimisation: the interesting question is which of *these* states
         are indistinguishable, and the answer has to follow the drawing.
         """
-        automaton = self.editor.automaton
+        automaton = self._deterministic_view("The marking table")
+        if automaton is None:
+            return
         if automaton.initial is None:
             self._show_message("The marking table needs an initial state")
             return
@@ -769,7 +934,9 @@ class AutomatonSimulator:
 
     def _trim_automaton(self) -> None:
         """Drop the states that cannot appear on an accepting run."""
-        automaton = self.editor.automaton
+        automaton = self._deterministic_view("Trim")
+        if automaton is None:
+            return
         trimmed = fsa.trim(automaton)
         removed = len(automaton.states) - len(trimmed.states)
         if not removed:
@@ -824,18 +991,22 @@ class AutomatonSimulator:
         arc = self.editor.pending_arc
         self.editor.cancel_transition()
 
-        if symbol not in self.editor.automaton.alphabet:
+        if symbol is not None and symbol not in self.editor.automaton.alphabet:
             self._show_message(f"'{symbol}' is not in the alphabet")
             return
 
-        replaced = self.editor.automaton.target(source, symbol)
+        already = self.editor.automaton.targets(source, symbol) - {target}
         if not self.editor.add_transition(source, symbol, target, arc):
             self._show_message(f"Could not add transition from {source}")
             return
         self._after_edit()
-        if replaced is not None and replaced != target:
+        if already:
+            # The second arrow used to delete the first. Now both are there,
+            # and saying so is the whole lesson: the machine has a choice, and
+            # that is a legal thing for it to have.
             self._show_message(
-                f"{source} --{symbol}--> {target}, replacing the edge to {replaced}")
+                f"{source} --{symbol}--> {target}; it also goes to "
+                f"{', '.join(sorted(already))}, so this is nondeterministic")
         else:
             self._show_message(f"{source} --{symbol}--> {target}")
 
@@ -863,6 +1034,7 @@ class AutomatonSimulator:
         self.ui_manager.show_context_menu(pos, [
             MenuItem("Add state here", events.AddStateAt(self._world(pos))),
             MenuItem(SEPARATOR),
+            MenuItem("Determinize", events.DeterminizeAutomaton()),
             MenuItem("Minimise", events.MinimizeAutomaton()),
             MenuItem("Marking table", events.ShowMarkingTable()),
             MenuItem("Trim", events.TrimAutomaton()),
@@ -952,8 +1124,27 @@ class AutomatonSimulator:
 
         The empty string is a legal and pedagogically important input. The old
         version refused it outright.
+
+        Two simulators, chosen by what is actually on the canvas. A
+        deterministic document runs through :func:`fsa.run`, so nothing about
+        the familiar animation changes for the case that is nearly always on
+        screen; a nondeterministic one runs through :func:`fsa.nfa.run`, whose
+        configurations are sets and whose rejection reason says every branch
+        died rather than that an arrow is missing.
+
+        Both are flattened into one trace here, and this is the only method
+        that knows there were two. Everything downstream -- the lit states, the
+        tokens, the panel, the tape -- reads the trace, which is why there is
+        no second animation path to keep in agreement with the first.
         """
-        result = fsa.run(self.editor.automaton, test_string)
+        result: AnyRun
+        if self.editor.is_deterministic:
+            result = fsa.run(self.editor.document.as_dfa(), test_string)
+            trace = _dfa_trace(result)
+        else:
+            automaton = self.editor.automaton
+            result = fsa.nfa.run(automaton, test_string)
+            trace = _nfa_trace(automaton, result)
         self.run_result = result
 
         self.ui_manager.test_result = result.explain()
@@ -964,54 +1155,63 @@ class AutomatonSimulator:
 
         self.execution_active = True
         self.execution_string = test_string
-        self.execution_path = list(result.path)
+        self.execution_trace = trace
         self.execution_step = 0
         self.traversing_step = None
         self.token_travel.jump_to(0.0)
 
-        if self.execution_path:
-            self.node_settle.set(self.execution_path[0], 1.0,
-                                 duration=self.theme.motion.quick,
-                                 easing=ease_out_back)
-            self.node_settle.set(self.execution_path[0], 0.0,
-                                 duration=self.theme.motion.normal)
+        if trace:
+            # Every state of the opening configuration swells, not one of them.
+            # On a machine with epsilon moves out of the start state that is
+            # already several, before a single symbol has been read.
+            for state in trace[0].configuration:
+                self.node_settle.set(state, 1.0,
+                                     duration=self.theme.motion.quick,
+                                     easing=ease_out_back)
+                self.node_settle.set(state, 0.0,
+                                     duration=self.theme.motion.normal)
 
     def _goto_execution_step(self, index: int, animate: bool = True) -> None:
         """Move the visualisation to a position in the run.
 
-        Animates the token along the edge connecting the two positions, in
-        whichever direction it is travelling, so stepping backwards reads as the
-        machine reversing rather than teleporting.
+        Animates a token along every edge connecting the two positions -- one
+        on a deterministic move, one per branch otherwise -- in whichever
+        direction it is travelling, so stepping backwards reads as the machine
+        reversing rather than teleporting.
         """
-        if not self.execution_active or not self.execution_path:
+        if not self.execution_active or not self.execution_trace:
             return
 
-        index = max(0, min(len(self.execution_path) - 1, index))
+        index = max(0, min(len(self.execution_trace) - 1, index))
         if index == self.execution_step:
             return
 
         forward = index > self.execution_step
+        # The move being crossed is the one entering the higher of the two
+        # positions, whichever way it is being crossed, so `traversing_step`
+        # still counts moves and its edges are `trace[step + 1].entered_by`.
         step_index = self.execution_step if forward else index
         self.execution_step = index
 
-        steps = self.run_result.steps if self.run_result else ()
-        if animate and 0 <= step_index < len(steps):
+        entered_by = self.execution_trace[step_index + 1].entered_by
+        if animate and entered_by:
             self.traversing_step = step_index
             self.token_travel.jump_to(0.0 if forward else 1.0)
             self.token_travel.set(1.0 if forward else 0.0,
                                   duration=self.theme.motion.step)
-            step = steps[step_index]
-            self.edge_active.set(f"{step.source}|{step.target}", 1.0,
-                                 duration=self.theme.motion.instant)
+            for source, target in entered_by:
+                self.edge_active.set(f"{source}|{target}", 1.0,
+                                     duration=self.theme.motion.instant)
         else:
             self.traversing_step = None
 
-        self.node_settle.set(self.execution_path[index], 1.0,
-                             duration=self.theme.motion.quick,
-                             easing=ease_out_back)
+        for state in self.execution_trace[index].configuration:
+            self.node_settle.set(state, 1.0,
+                                 duration=self.theme.motion.quick,
+                                 easing=ease_out_back)
 
     def _next_execution_step(self) -> None:
-        if self.execution_active and self.execution_step < len(self.execution_path) - 1:
+        if self.execution_active and self.execution_step < len(self.execution_trace) - 1:
             self._goto_execution_step(self.execution_step + 1)
 
     def _previous_execution_step(self) -> None:
@@ -1022,7 +1222,7 @@ class AutomatonSimulator:
         self.execution_active = False
         self.execution_step = 0
         self.execution_string = ""
-        self.execution_path = []
+        self.execution_trace = []
         self.run_result = None
         self.traversing_step = None
         self.animation_active = False
@@ -1050,7 +1250,7 @@ class AutomatonSimulator:
         if now - self.animation_timer < interval:
             return
 
-        if self.execution_step < len(self.execution_path) - 1:
+        if self.execution_step < len(self.execution_trace) - 1:
             self._goto_execution_step(self.execution_step + 1)
             self.animation_timer = now
         else:
@@ -1058,11 +1258,18 @@ class AutomatonSimulator:
             self.animation_active = False
             self._show_message("Playback finished")
 
-    def _current_execution_state(self) -> Optional[str]:
-        if not self.execution_active or not self.execution_path:
-            return None
-        return self.execution_path[min(self.execution_step,
-                                       len(self.execution_path) - 1)]
+    def _current_configuration(self) -> FrozenSet[str]:
+        """Every state the machine stands in right now.
+
+        A set, always, so the canvas can light all of them. A DFA's
+        configuration is a set of one, so this is not a nondeterministic
+        special case -- it is the general statement, of which the old
+        single-state answer was the narrow reading.
+        """
+        if not self.execution_active or not self.execution_trace:
+            return frozenset()
+        index = min(self.execution_step, len(self.execution_trace) - 1)
+        return self.execution_trace[index].configuration
 
     # ------------------------------------------------------------------
     # Camera
@@ -1125,17 +1332,21 @@ class AutomatonSimulator:
                       self.node_settle):
             track.drop_missing(states)
 
-        current = self._current_execution_state()
+        # `in`, not `==`: every state of the configuration is lit, which on a
+        # nondeterministic run is the whole point -- the frontier spreading
+        # across the diagram and collapsing again is the lesson, and lighting
+        # one state chosen out of it would teach the opposite.
+        current = self._current_configuration()
         for state in states:
             self.node_selected.set(state, 1.0 if state == self.editor.selection else 0.0)
             self.node_hover.set(state, 1.0 if state == self.editor.hover else 0.0)
             self.node_settle.set(state, 0.0, duration=self.theme.motion.normal)
-            self.node_active.set(state, 1.0 if state == current else 0.0)
+            self.node_active.set(state, 1.0 if state in current else 0.0)
 
         if self.token_travel.is_settled:
-            # The token exists only while travelling; parked on a node's rim it
+            # Tokens exist only while travelling; parked on a node's rim they
             # covered the label and contradicted the glow that already marks
-            # the current state.
+            # the current configuration.
             self.traversing_step = None
             for edge in self.editor.automaton.grouped_transitions():
                 self.edge_active.set(f"{edge[0]}|{edge[1]}", 0.0,
@@ -1145,11 +1356,14 @@ class AutomatonSimulator:
     # Scene
     # ------------------------------------------------------------------
 
-    def _symbol_index(self, symbol: str) -> int:
+    def _symbol_index(self, symbol: Optional[str]) -> int:
         """Position in the sorted alphabet, for edge colouring.
 
         Keyed on position rather than the literal characters 'a' and 'b', which
-        rendered the shipped {0,1} example entirely in one colour.
+        rendered the shipped {0,1} example entirely in one colour. An epsilon
+        move is not in the alphabet and falls past the end of it, which is the
+        right answer and not a coincidence: it is not one of the letters, so it
+        does not take one of their colours.
         """
         alphabet = sorted(self.editor.automaton.alphabet)
         return alphabet.index(symbol) if symbol in alphabet else len(alphabet)
@@ -1233,7 +1447,11 @@ class AutomatonSimulator:
         edge_paths = self._edge_paths(positions, self._loop_angle_cache)
         grouped = automaton.grouped_transitions()
         for edge, path in edge_paths.items():
-            symbols = sorted(grouped[edge])
+            # Keyed sort and a spelled-out epsilon: an edge's symbol set may
+            # hold None, which plain `sorted` raises on and `", ".join` cannot
+            # write. Both would be a crash in the frame loop the first time
+            # someone drew a move that reads nothing.
+            symbols = sorted(grouped[edge], key=_label_order)
             label_at = None
             if edge[0] == edge[1]:
                 label_at = geometry.self_loop_label_anchor(
@@ -1241,7 +1459,8 @@ class AutomatonSimulator:
             scene.edges.append(EdgeVisual(
                 key=edge,
                 path=path,
-                label=", ".join(symbols),
+                label=", ".join(EPSILON_LABEL if s is None else s
+                                for s in symbols),
                 label_at=label_at,
                 color_index=self._symbol_index(symbols[0]) if symbols else 0,
                 active=self.edge_active.get(f"{edge[0]}|{edge[1]}"),
@@ -1283,43 +1502,55 @@ class AutomatonSimulator:
             scene.ghost_edge = GhostEdge(
                 path=geometry.edge_path(positions[pending], world_mouse,
                                         radius, 0.0, self.editor.pending_arc),
-                label=self.ui_manager.selected_symbol,
-                valid=self.ui_manager.selected_symbol in automaton.alphabet,
+                label=_shown_symbol(self.ui_manager.selected_symbol),
+                valid=(self.ui_manager.selected_symbol is None
+                       or self.ui_manager.selected_symbol in automaton.alphabet),
             )
 
-        scene.token = self._build_token(edge_paths)
+        scene.tokens = self._build_tokens(edge_paths)
         return scene
 
-    def _build_token(self, edge_paths) -> Optional[TokenVisual]:
-        """The read head, positioned along the edge it is crossing.
+    def _build_tokens(self, edge_paths) -> List[TokenVisual]:
+        """The read heads, one on every edge the machine is crossing.
 
-        This is what replaces a text label teleporting between states: the
+        This is what replaces a text label teleporting between states: each
         marker moves along the real drawn path, at constant speed in screen
         distance rather than in curve parameter.
 
-        At rest there is no token -- the active state's glow already says where
-        the machine is, and a marker parked on a node covers its label.
+        **Several, when the move has several branches.** A nondeterministic
+        machine takes every branch at once, so every branch gets a token: the
+        picture is a set of tokens fanning out and rejoining. The alternative
+        of putting one token on a branch picked by sort order was rejected
+        outright -- it would draw a machine that made a choice, which is
+        precisely the thing an NFA does not do, and the viewer would have no
+        way to tell the drawn choice from a real one. Showing none and lighting
+        only the destination states would be honest but loses the motion that
+        makes a run legible at all, and the motion is why this exists.
+
+        At rest there are none -- the lit states already say where the machine
+        is, and a marker parked on a node covers its label.
         """
-        if not self.execution_active or not self.run_result:
-            return None
-        if self.traversing_step is None:
-            return None
-
-        steps = self.run_result.steps
-        if self.traversing_step >= len(steps):
-            return None
-
-        step = steps[self.traversing_step]
-        path = edge_paths.get((step.source, step.target))
-        if not path:
-            return None
+        if not self.execution_active or self.traversing_step is None:
+            return []
+        index = self.traversing_step + 1
+        if index >= len(self.execution_trace):
+            return []
 
         travel = self.token_travel.value
         trail_start = max(0.0, travel - 0.22)
-        trail = [geometry.point_at(path, trail_start + (travel - trail_start) * i / 6)
-                 for i in range(7)]
-        return TokenVisual(position=geometry.point_at(path, travel),
-                           radius=7.0, trail=trail, intensity=1.0)
+        tokens: List[TokenVisual] = []
+        for edge in self.execution_trace[index].entered_by:
+            # A missing path is an edge the user deleted while the run was
+            # still on screen. Skipped, not crashed on: the trace records what
+            # the machine did, and the canvas is free to have moved on.
+            path = edge_paths.get(edge)
+            if not path:
+                continue
+            trail = [geometry.point_at(path, trail_start + (travel - trail_start) * i / 6)
+                     for i in range(7)]
+            tokens.append(TokenVisual(position=geometry.point_at(path, travel),
+                                      radius=7.0, trail=trail, intensity=1.0))
+        return tokens
 
     # ------------------------------------------------------------------
     # Rendering
@@ -1341,8 +1572,9 @@ class AutomatonSimulator:
         self.ui_manager.draw(self.editor.automaton, self.ui_manager.test_result,
                              self.animation_active, self.execution_active)
         self.ui_manager.draw_execution_status(
-            self.execution_active, self.execution_step,
-            self.execution_string, self.execution_path, self.run_result)
+            self.execution_active, self.execution_step, self.execution_string,
+            [position.configuration for position in self.execution_trace],
+            self.run_result)
         self.ui_manager.draw_legend(self.editor.automaton)
         # Called even when inactive: the strip animates itself out.
         self.ui_manager.draw_string_visualization(

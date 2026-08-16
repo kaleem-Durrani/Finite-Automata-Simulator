@@ -71,9 +71,9 @@ def test_demo_recognises_a_star_b_plus(demo):
     accepted = ["b", "ab", "aab", "abb", "bb"]
     rejected = ["", "a", "aa", "ba", "aba"]
     for word in accepted:
-        assert fsa.accepts(demo.automaton, word), word
+        assert fsa.accepts(demo.as_dfa(), word), word
     for word in rejected:
-        assert not fsa.accepts(demo.automaton, word), word
+        assert not fsa.accepts(demo.as_dfa(), word), word
 
 
 def test_demo_has_a_layout(demo):

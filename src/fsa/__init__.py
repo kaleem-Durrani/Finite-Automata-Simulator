@@ -12,6 +12,12 @@ imports pygame, and CI enforces that. The GUI is one front end among several.
     "'a' was accepted in q1"
     >>> run(a, "aa").explain()
     "'aa' was rejected: no transition from q1 on 'a' at position 1 -- this automaton is incomplete"
+
+There are two machine types and one document type. :class:`DFA` promises
+determinism in its type and :class:`NFA` does not; a :class:`Document` holds an
+NFA always, and hands out the deterministic reading through
+:meth:`Document.as_dfa` for the algorithms that need one. :data:`AnyAutomaton`
+names the pair, for the few functions that read only what both expose.
 """
 
 from fsa import equivalence, export, geometry, language, nfa, ops, product, subset
@@ -37,7 +43,7 @@ from fsa.errors import (
     NondeterministicError,
     UnknownStateError,
 )
-from fsa.layout import Layout, Point
+from fsa.layout import AnyAutomaton, Layout, Point
 from fsa.minimize import MarkingTable, marking_table, minimize
 
 # `nfa.accepts` and `nfa.run` are deliberately NOT re-exported: the names
@@ -79,6 +85,7 @@ __all__ = [
     "nfa",
     "subset",
     "NFA",
+    "AnyAutomaton",
     "EPSILON",
     "determinize",
     "NondeterministicError",

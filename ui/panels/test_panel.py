@@ -30,7 +30,7 @@ def draw(chrome: Chrome, *,
          input_expanded: bool,
          test_result: str,
          test_verdict: str,
-         automaton: "fsa.DFA",
+         automaton: "fsa.AnyAutomaton",
          mouse_pos: tuple,
          pressed_rect: Optional[pygame.Rect] = None) -> None:
     """Draw the input area for testing strings.

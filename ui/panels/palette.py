@@ -10,6 +10,7 @@ from typing import Mapping, Optional, Tuple
 
 import pygame
 
+from editor import EPSILON_LABEL
 from rendering import primitives
 from ui import widgets
 from ui.widgets import Chrome
@@ -59,7 +60,11 @@ def draw(chrome: Chrome, *,
 
         primitives.panel(chrome.screen, button_rect, fill,
                          radius=chrome.radius.md, border=border)
-        surface = mono.render(symbol, True, text_color)
+        # `None` is the epsilon move. Shown as the letter, stored as the
+        # engine spells it, so a real epsilon in the alphabet stays a
+        # different chip from the empty move.
+        surface = mono.render(EPSILON_LABEL if symbol is None else symbol,
+                              True, text_color)
         chrome.screen.blit(surface, surface.get_rect(center=button_rect.center))
 
         # A hairline in this symbol's edge colour, tying the palette to the

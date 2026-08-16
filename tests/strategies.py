@@ -117,7 +117,27 @@ def words(draw: st.DrawFn, *, alphabet: Sequence[str] = DEFAULT_ALPHABET,
 
 @st.composite
 def documents(draw: st.DrawFn, **kwargs) -> fsa.Document:
-    """A document: an automaton plus coordinates for every one of its states."""
+    """A document: an automaton plus coordinates for every one of its states.
+
+    Deterministic, which is what the properties about the DFA algorithms want.
+    :func:`nfa_documents` is the same thing without that promise.
+    """
     automaton = draw(dfas(**kwargs))
+    return fsa.Document(automaton, fsa.Layout.auto(automaton),
+                        len(automaton.states))
+
+
+@st.composite
+def nfa_documents(draw: st.DrawFn, **kwargs) -> fsa.Document:
+    """A document that may be nondeterministic.
+
+    ``Document`` holds an NFA always, so this is not a different kind of
+    document -- it is the same strategy with the determinism promise dropped,
+    and roughly a third of what it draws happens to be deterministic anyway.
+    That mixture is the point: anything reading a document has to be right for
+    both, and a generator that only produced branching machines would never
+    exercise the version 2 half of the serializer.
+    """
+    automaton = draw(nfas(**kwargs))
     return fsa.Document(automaton, fsa.Layout.auto(automaton),
                         len(automaton.states))
