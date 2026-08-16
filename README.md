@@ -26,6 +26,11 @@ then step through how a string is processed, one symbol at a time.
   automatically, and labels on plates so they stay legible where edges cross
 - **Configurable symbol palette** — `a`, `b`, `0`, `1` by default; more can be added at runtime
 - **Context menus** — right-click a state to change its type or delete it
+- **Exercises that mark themselves** — an exercise states a language in prose and
+  keeps the answer as a regular expression. A wrong submission is told the
+  *shortest word* that betrays it and which side accepts it, and in the editor
+  that word is dropped into the test field and run, so you watch your own machine
+  take the wrong path
 - **Regular expressions, both ways** — a pattern becomes a machine by Thompson's
   construction, and a machine becomes a pattern by state elimination. That round
   trip is Kleene's theorem, and it is checked against `greenery` rather than
@@ -178,6 +183,8 @@ fsa run      machine.json 0110    # ...and show every step
 fsa check    machine.json         # structural problems; exit 1 if any
 fsa show     machine.json         # the transition table
 fsa sample   machine.json -n 10   # words it accepts, shortest first
+fsa check  attempt.json --against task.fsx   # graded: exit 1 + the word
+fsa mark   tasks/ submissions/ -o out.csv    # a whole class at once
 fsa from-regex "a*b+"             # the machine a pattern denotes
 fsa to-regex   machine.json       # the pattern a machine denotes
 fsa determinize nfa.json          # subset construction: NFA -> DFA

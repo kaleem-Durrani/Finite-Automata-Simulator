@@ -106,6 +106,18 @@ ignore_missing_imports = true
 module = "greenery.*"
 ignore_missing_imports = true
 
+# `rich` prettifies one table, `fsa mark`'s. It is deliberately not a
+# dependency -- not in `dependencies`, not in `dev`, not installed here -- and
+# the CLI imports it inside a `try` with a plain-columns fallback, so the
+# fallback is the path that actually runs. Without this, type checking a
+# machine that does not have it fails on an import that is *meant* to fail at
+# runtime. `ignore_missing_imports` rather than a `# type: ignore` at the
+# import, because the ignore would itself become an error under
+# `warn_unused_ignores` on any machine where someone had installed rich.
+[[tool.mypy.overrides]]
+module = "rich.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

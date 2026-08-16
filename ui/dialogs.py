@@ -27,6 +27,11 @@ FILE_PROMPT_SIZE = (440, 200)
 #: an empty pattern is the empty word, not a cancelled dialog.
 REGEX_HINT = "| choice, * + ? repetition, () grouping. Empty means ε."
 
+#: What the exercise prompt says about where a task comes from. The bundled
+#: directory is named because the alternative is a blank field and a filename
+#: nobody has been told, which is a dialog most people cancel.
+EXERCISE_HINT = "An .fsx exercise. The extension and examples/ are assumed."
+
 
 # ----------------------------------------------------------------------
 # Where a dialog sits
@@ -117,6 +122,7 @@ def draw_file_prompt(chrome: Chrome, *, layout: LayoutSpec,
                      mouse_pos: Optional[Tuple[int, int]] = None) -> None:
     """Draw the filename prompt, or one of its rename and regex variants."""
     titles = {"save": "Save as", "load": "Load file",
+              "exercise": "Open an exercise",
               "rename": f"Rename {rename_target}",
               "regex": "From a regular expression"}
     # Drawn at the size :func:`file_prompt_rect` reports, which is what
@@ -132,7 +138,8 @@ def draw_file_prompt(chrome: Chrome, *, layout: LayoutSpec,
     small = chrome.fonts.ui("small")
     budget = rect.width - chrome.space.lg * 2
     hints = {"rename": "A display label. Leave empty to use the state's id.",
-             "regex": REGEX_HINT}
+             "regex": REGEX_HINT,
+             "exercise": EXERCISE_HINT}
     # The hint stays put when there is also a complaint to make, rather than
     # being replaced by it: how to write one of these is exactly what somebody
     # who has just written one wrong needs in front of them.
@@ -179,7 +186,7 @@ def draw_file_prompt(chrome: Chrome, *, layout: LayoutSpec,
                          (caret_x, field.top + 7), (caret_x, field.bottom - 7), 2)
 
     verbs = {"save": "Save", "load": "Load", "rename": "Rename",
-             "regex": "Build"}
+             "regex": "Build", "exercise": "Open"}
     cancel, confirm = layout.confirm_buttons(rect)
     if mouse_pos is None:
         mouse_pos = pygame.mouse.get_pos()

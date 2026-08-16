@@ -10,13 +10,15 @@ autograder actually reads:
 Nothing here touches a display. If any of it needs pygame, the boundary broke.
 """
 
+import csv
+import importlib.util
 import io
 import json
 
 import pytest
 
 import fsa
-from fsa import Document, regex, serialize
+from fsa import Document, exercise, regex, serialize
 from fsa.cli import NO, OK, USAGE, main
 
 
@@ -231,6 +233,10 @@ def test_epsilon_falls_back_where_the_terminal_cannot_encode_it(tmp_path):
 
         text = raw.getvalue().decode("cp1252")
         assert "eps" in text and "ε" not in text
+
+
+# ---------------------------------------------------------------------------
+# export
 # ---------------------------------------------------------------------------
 
 
@@ -530,6 +536,556 @@ def test_a_pattern_survives_the_round_trip_through_files(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# check --against, and mark
+#
+# Grading from the shell. Two things are being tested and they are not the same
+# thing:
+#
+# * **The exit code**, so a marking script can branch on the status alone. Every
+#   test here asserts it, because a grader that has to parse prose is a grader
+#   that breaks the first time the prose improves.
+# * **The sentence**, which is the whole reason this exists. The study behind
+#   the phase found a weaker cohort beating a stronger one purely from getting
+#   counterexample strings back, so "wrong" is not an acceptable output and the
+#   tests say what the output has to contain.
+#
+# The empty word gets its own tests in both shapes -- as a sentence, where it is
+# spelled out in words, and as a table cell, where it is ε with the usual ASCII
+# fallback -- because it is the commonest counterexample there is and it is the
+# one that renders as nothing at all if nobody thinks about it.
+# ---------------------------------------------------------------------------
+
+
+#: An even number of a's over {a, b}: the reference every submission below is
+#: marked against. Three spellings of the same language, so "correct" is tested
+#: as a property of the language and not of a machine anyone drew.
+EVEN_AS = "b*(ab*ab*)*"
+CORRECT_ANSWERS = (EVEN_AS, "(b|ab*a)*", "(ab*a|b)*", "b*(ab*ab*)*b*")
+
+#: Wrong answers, each with the shortest word that proves it wrong. The words
+#: are asserted, not just their existence: the counterexample being the
+#: *shortest* one is what makes it small enough to trace by hand.
+WRONG_ANSWERS = (
+    ("(a|b)*", "a"),            # accepts everything
+    ("b*", "aa"),               # no a's at all
+    ("(aa)*", "b"),             # forgot the b's
+    ("a*b*", "a"),              # counted nothing
+    ("(ab*ab*)*", "b"),         # a leading b falls off
+    ("b*(ab*a)*b*", "aabaa"),   # right until the fifth symbol
+)
+
+
+def write_exercise(directory, name, pattern, alphabet="ab", *, title=""):
+    """An exercise file, written the way a marker's directory holds one."""
+    path = directory / f"{name}{exercise.EXTENSION}"
+    path.write_text(json.dumps({
+        "version": exercise.VERSION,
+        "kind": exercise.KIND,
+        "title": title or name,
+        "prompt": "Build a DFA that accepts exactly the right words.",
+        "alphabet": sorted(set(alphabet)),
+        "reference": {"regex": pattern},
+        "examples": {"accept": [], "reject": []},
+    }), encoding="utf-8")
+    return str(path)
+
+
+def write_submission(path, pattern, *, determinize=True):
+    """A submission, as the machine a pattern denotes.
+
+    Determinized by default, because that is what the exercise asked for. With
+    ``determinize=False`` it is Thompson's machine written out whole -- epsilon
+    moves and all, exactly what ``fsa from-regex`` produces -- which is a
+    legitimate thing for a student to hand in and a different code path.
+    """
+    machine = regex.to_nfa(pattern)
+    if determinize:
+        machine = fsa.determinize(machine)
+    document = Document.of(machine, fsa.Layout.auto(machine))
+    serialize.save(document, str(path))
+    return str(path)
+
+
+@pytest.fixture
+def task(tmp_path):
+    """``exercises/even_as.fsx``, alone in its directory."""
+    directory = tmp_path / "exercises"
+    directory.mkdir()
+    return write_exercise(directory, "even_as", EVEN_AS,
+                          title="An even number of a's")
+
+
+@pytest.fixture
+def submissions(tmp_path):
+    """An empty ``submissions/`` for a test to fill."""
+    directory = tmp_path / "submissions"
+    directory.mkdir()
+    return directory
+
+
+@pytest.mark.parametrize("pattern", CORRECT_ANSWERS)
+def test_a_correct_submission_exits_zero(tmp_path, task, pattern):
+    """Correct is a property of the language, so four machines that share no
+    states pass the same exercise."""
+    attempt = write_submission(tmp_path / "attempt.json", pattern)
+    code, out, _ = run("check", attempt, "--against", task)
+    assert code == OK
+    assert "correct" in out
+    assert "An even number of a's" in out       # which exercise, not just yes
+
+
+@pytest.mark.parametrize("pattern,word", WRONG_ANSWERS)
+def test_a_wrong_submission_exits_one_and_names_the_word(tmp_path, task,
+                                                         pattern, word):
+    """The counterexample is the feature. It is named, it is the shortest one,
+    and the sentence says which side accepts it -- "wrong" would be useless and
+    "your machine accepts 'aabaa'" points at an arrow."""
+    attempt = write_submission(tmp_path / "attempt.json", pattern)
+    code, out, _ = run("check", attempt, "--against", task)
+    assert code == NO
+    assert repr(word) in out
+    assert ("accepts" in out) and ("rejects" in out)
+
+
+def test_the_counterexample_really_does_distinguish_the_two(tmp_path, task):
+    """Fed back through the CLI: the word the grader named is a word the
+    submission and the reference genuinely answer differently. Nothing here
+    trusts the sentence -- it is re-run against both machines."""
+    attempt = write_submission(tmp_path / "attempt.json", "b*")
+    reference = write_submission(tmp_path / "reference.json", EVEN_AS)
+
+    code, out, _ = run("check", attempt, "--against", task)
+    assert code == NO
+    word = out.strip().splitlines()[-1].split("'")[1]
+
+    assert run("test", attempt, word)[0] != run("test", reference, word)[0]
+
+
+def test_a_submission_may_be_nondeterministic(tmp_path, task):
+    """An NFA is a machine recognising a language, which is all the exercise
+    asked for -- and it is exactly what ``fsa from-regex`` writes. Refusing it
+    would fail an answer that is right."""
+    attempt = write_submission(tmp_path / "nfa.json", EVEN_AS, determinize=False)
+    assert not serialize.load(attempt).is_deterministic
+
+    code, out, _ = run("check", attempt, "--against", task)
+    assert code == OK
+    assert "correct" in out
+
+
+def test_a_submission_over_the_wrong_alphabet_is_told_so(tmp_path, task):
+    """A machine drawn over {0,1} handed in for a task over {a,b} disagrees on
+    a one-symbol word, and "your machine accepts '0'" on its own reads as
+    nonsense until you notice which alphabet it is in."""
+    attempt = write_submission(tmp_path / "attempt.json", "(0|1)*")
+    code, out, _ = run("check", attempt, "--against", task)
+    assert code == NO
+    assert "not in this exercise's alphabet" in out
+    assert "{a, b}" in out
+
+
+def test_a_submission_with_no_initial_state_is_wrong_not_unrunnable(tmp_path,
+                                                                    task):
+    """Exit 1, not 2. The file opened and the question was asked; the answer is
+    that this is not the reference. And the remedy is named, because "no initial
+    state" is a sentence a student can read twice without knowing what to
+    click."""
+    document, _ = Document().add_symbol("a").add_state((0.0, 0.0))
+    path = tmp_path / "no_start.json"
+    serialize.save(document.set_initial(None), str(path))
+
+    code, out, _ = run("check", str(path), "--against", task)
+    assert code == NO
+    assert "no initial state" in out
+    assert "mark one state as the start" in out
+
+
+def test_the_empty_word_is_spelled_out_in_the_sentence(tmp_path):
+    """The commonest counterexample there is: two machines that disagree about
+    their start states disagree about "" before reading anything. ``your machine
+    rejects ''`` reads like a bug in the marker, so it comes out in words."""
+    everything = write_exercise(tmp_path, "everything", "(a|b)*")
+    attempt = write_submission(tmp_path / "attempt.json", "(a|b)(a|b)*")
+
+    code, out, _ = run("check", attempt, "--against", everything)
+    assert code == NO
+    assert "the empty word" in out
+    assert "''" not in out
+
+
+def test_the_sentence_survives_a_terminal_that_cannot_encode_greek(tmp_path):
+    """The empty word is the commonest counterexample and ε is the character a
+    Windows code page cannot print, so this pairing is the one that would take
+    the grader down. It does not, because the sentence never uses ε."""
+    everything = write_exercise(tmp_path, "everything", "(a|b)*")
+    attempt = write_submission(tmp_path / "attempt.json", "(a|b)(a|b)*")
+
+    raw = io.BytesIO()
+    out = io.TextIOWrapper(raw, encoding="cp1252", newline="")
+    assert main(["check", attempt, "--against", everything],
+                out=out, err=io.StringIO()) == NO
+    out.flush()
+    assert "the empty word" in raw.getvalue().decode("cp1252")
+
+
+def test_check_without_against_still_asks_the_structural_question(tmp_path,
+                                                                   machine):
+    """Two questions under one verb, and they are genuinely different: this
+    machine has a trap state nobody can escape -- a defect -- while recognising
+    exactly the language its exercise asks for. Neither answer is the other's,
+    which is why the flag has to choose."""
+    theirs = write_exercise(tmp_path, "zeros_then_ones", "0*1+", alphabet="01")
+
+    assert run("check", machine)[0] == NO                        # defects
+    assert run("check", machine, "--against", theirs)[0] == OK   # correct
+
+
+def test_grading_against_a_missing_exercise_exits_two(tmp_path):
+    attempt = write_submission(tmp_path / "attempt.json", EVEN_AS)
+    code, _, err = run("check", attempt, "--against", str(tmp_path / "no.fsx"))
+    assert code == USAGE
+    assert "no.fsx" in err
+
+
+def test_grading_against_a_document_says_it_is_the_wrong_kind(machine):
+    """Both formats are JSON with a `version`, so the confusing failure is the
+    likely one. It is named rather than blamed on a version number."""
+    code, _, err = run("check", machine, "--against", machine)
+    assert code == USAGE
+    assert "automaton document rather than an exercise" in err
+
+
+def test_grading_a_missing_submission_exits_two(tmp_path, task):
+    code, _, err = run("check", str(tmp_path / "gone.json"), "--against", task)
+    assert code == USAGE
+    assert "gone.json" in err
+
+
+# --- mark ------------------------------------------------------------------
+
+
+def read_csv(path):
+    """The results file, parsed by the csv module rather than by eye."""
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def test_mark_writes_a_row_for_every_submission(task, submissions, tmp_path):
+    """Exit criterion: twenty submissions, a CSV a marker can open. Read back
+    with the csv module, so quoting and line endings are the module's problem
+    and are actually exercised."""
+    patterns = ([CORRECT_ANSWERS[index % len(CORRECT_ANSWERS)]
+                 for index in range(12)]
+                + [WRONG_ANSWERS[index % len(WRONG_ANSWERS)][0]
+                   for index in range(8)])
+    for index, pattern in enumerate(patterns):
+        write_submission(submissions / f"s{index:02d}.json", pattern)
+
+    results = tmp_path / "results.csv"
+    code, out, _ = run("mark", str(task), str(submissions), "-o", str(results))
+    assert code == NO                       # not everyone was right
+
+    rows = read_csv(str(results))
+    assert len(rows) == 20
+    assert sum(1 for row in rows if row["correct"] == "yes") == 12
+    assert sum(1 for row in rows if row["correct"] == "no") == 8
+    assert all(row["exercise"] == "even_as" for row in rows)
+    assert "20 submissions: 12 correct, 8 wrong" in out
+
+
+def test_the_csv_carries_the_counterexample_and_the_sentence(task, submissions,
+                                                             tmp_path):
+    """The two columns a marker actually reads. The message is the one from
+    `fsa.exercise`, verbatim -- the CLI does not paraphrase it."""
+    write_submission(submissions / "wrong.json", "b*")
+    results = tmp_path / "results.csv"
+    assert run("mark", str(task), str(submissions), "-o", str(results))[0] == NO
+
+    row, = read_csv(str(results))
+    assert row["submission"] == "wrong.json"
+    assert row["counterexample"] == "aa"
+    assert row["attempt"] == "rejects"
+    assert row["message"] == "your machine rejects 'aa', the answer accepts it"
+
+
+def test_the_empty_word_is_told_apart_from_no_word_at_all(submissions,
+                                                          tmp_path):
+    """Three rows leave the counterexample cell blank and they mean three
+    different things. `attempt` is what separates them: it is filled in exactly
+    when a distinguishing word exists, which is the invariant Result promises,
+    so (no, blank, rejects) is "differs on the empty word" while (no, blank,
+    blank) is "there was no language to compare"."""
+    everything = write_exercise(tmp_path, "everything", "(a|b)*")
+    write_submission(submissions / "nonempty.json", "(a|b)(a|b)*")
+    write_submission(submissions / "right.json", "(a|b)*")
+    document, _ = Document().add_symbol("a").add_state((0.0, 0.0))
+    serialize.save(document.set_initial(None),
+                   str(submissions / "no_start.json"))
+
+    results = tmp_path / "results.csv"
+    assert run("mark", everything, str(submissions), "-o", str(results))[0] == NO
+
+    rows = {row["submission"]: row for row in read_csv(str(results))}
+    assert rows["nonempty.json"]["correct"] == "no"
+    assert rows["nonempty.json"]["counterexample"] == ""
+    assert rows["nonempty.json"]["attempt"] == "rejects"
+
+    assert rows["right.json"]["correct"] == "yes"
+    assert rows["right.json"]["counterexample"] == ""
+    assert rows["right.json"]["attempt"] == ""
+
+    assert rows["no_start.json"]["correct"] == "no"
+    assert rows["no_start.json"]["attempt"] == ""
+    assert "no initial state" in rows["no_start.json"]["message"]
+
+
+def test_the_table_writes_the_empty_word_as_epsilon(submissions, tmp_path):
+    """A sentence says "the empty word"; a column four characters wide says ε,
+    the spelling `sample` and `show` already use -- with the same fallback for
+    the terminal that cannot encode it, which is the one this runs on."""
+    everything = write_exercise(tmp_path, "everything", "(a|b)*")
+    write_submission(submissions / "nonempty.json", "(a|b)(a|b)*")
+
+    code, out, _ = run("mark", everything, str(submissions))
+    assert code == NO
+    assert "ε" in out
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", newline="")
+    assert main(["mark", everything, str(submissions)],
+                out=stream, err=io.StringIO()) == NO
+    stream.flush()
+    text = raw.getvalue().decode("cp1252")
+    assert "eps" in text and "ε" not in text
+
+
+def test_a_malformed_submission_is_a_row_not_a_crash(task, submissions,
+                                                     tmp_path):
+    """The one that matters on real submissions: a file that will not open
+    costs its own row, not the other nineteen students' marks."""
+    write_submission(submissions / "alice.json", EVEN_AS)
+    (submissions / "bob.json").write_text("{not json", encoding="utf-8")
+    write_submission(submissions / "carol.json", "b*")
+    (submissions / "dave.json").write_text("[]", encoding="utf-8")
+
+    results = tmp_path / "results.csv"
+    code, out, err = run("mark", str(task), str(submissions), "-o", str(results))
+    assert code == NO
+
+    rows = {row["submission"]: row for row in read_csv(str(results))}
+    assert set(rows) == {"alice.json", "bob.json", "carol.json", "dave.json"}
+    assert rows["alice.json"]["correct"] == "yes"
+    assert rows["carol.json"]["correct"] == "no"
+
+    # Neither right nor wrong: a third answer, so a marker can sort the files
+    # to go and look at into a pile of their own.
+    assert rows["bob.json"]["correct"] == "error"
+    assert rows["dave.json"]["correct"] == "error"
+    assert "JSON" in rows["bob.json"]["message"]
+    assert "bob.json" in err                    # and said out loud, once
+    assert "1 correct, 1 wrong, 2 could not be marked" in out
+
+
+def test_mark_exits_zero_when_every_submission_is_correct(task, submissions):
+    """So `fsa mark exercises/ submissions/ && echo all passed` says something
+    true, and a CI check on a worked-solutions directory is one line."""
+    for index, pattern in enumerate(CORRECT_ANSWERS):
+        write_submission(submissions / f"s{index}.json", pattern)
+
+    code, out, _ = run("mark", str(task), str(submissions))
+    assert code == OK
+    assert "4 submissions: 4 correct, 0 wrong" in out
+    assert "could not be marked" not in out     # only named when it happened
+
+
+def test_mark_pairs_a_submission_with_the_exercise_its_path_names(tmp_path,
+                                                                  submissions):
+    """With more than one exercise, the pairing is by name -- either a
+    directory or part of the filename, since both are layouts a marker will
+    already have."""
+    exercises = tmp_path / "exercises"
+    exercises.mkdir()
+    write_exercise(exercises, "even_as", EVEN_AS)
+    write_exercise(exercises, "ends_with_b", "(a|b)*b")
+
+    nested = submissions / "ends_with_b"
+    nested.mkdir()
+    write_submission(nested / "alice.json", "(a|b)*b")
+    write_submission(submissions / "bob.even_as.json", EVEN_AS)
+    # Correct for `even_as`, but it is not the question this one was asked.
+    write_submission(nested / "carol.json", EVEN_AS)
+
+    results = tmp_path / "results.csv"
+    assert run("mark", str(exercises), str(submissions),
+               "-o", str(results))[0] == NO
+
+    rows = {row["submission"]: row for row in read_csv(str(results))}
+    assert rows["ends_with_b/alice.json"]["exercise"] == "ends_with_b"
+    assert rows["ends_with_b/alice.json"]["correct"] == "yes"
+    assert rows["bob.even_as.json"]["exercise"] == "even_as"
+    assert rows["bob.even_as.json"]["correct"] == "yes"
+    assert rows["ends_with_b/carol.json"]["correct"] == "no"
+
+
+def test_an_unpaired_submission_is_not_guessed_at(tmp_path, submissions):
+    """Marking it against an arbitrary exercise would hand a student a
+    counterexample to a question they were not answering: confident feedback
+    about the wrong thing, which is worse than none."""
+    exercises = tmp_path / "exercises"
+    exercises.mkdir()
+    write_exercise(exercises, "even_as", EVEN_AS)
+    write_exercise(exercises, "ends_with_b", "(a|b)*b")
+    write_submission(submissions / "anonymous.json", EVEN_AS)
+
+    results = tmp_path / "results.csv"
+    code, _, err = run("mark", str(exercises), str(submissions),
+                       "-o", str(results))
+    assert code == NO
+
+    row, = read_csv(str(results))
+    assert row["correct"] == "error"
+    assert row["exercise"] == ""
+    assert "no exercise" in row["message"]
+    assert "anonymous.json" in err
+
+
+def test_a_single_exercise_marks_everything_however_it_is_named(tmp_path,
+                                                                submissions):
+    """One task, twenty students, filenames nobody agreed in advance: with
+    nothing to choose between, there is nothing to pair."""
+    lone = write_exercise(tmp_path, "even_as", EVEN_AS)
+    write_submission(submissions / "22i-1234.json", EVEN_AS)
+
+    code, out, _ = run("mark", lone, str(submissions))
+    assert code == OK
+    assert "22i-1234.json" in out
+
+
+def test_mark_prints_plain_columns_when_rich_is_absent(task, submissions):
+    """rich is optional and not installed here, so this is the path that runs.
+    The table is the same shape `run` and `show` print: headings, an ASCII rule,
+    two spaces between columns."""
+    if importlib.util.find_spec("rich") is not None:
+        pytest.skip("rich is installed, so this is not the path taken")
+    write_submission(submissions / "alice.json", EVEN_AS)
+    write_submission(submissions / "bob.json", "b*")
+
+    code, out, _ = run("mark", str(task), str(submissions))
+    assert code == NO
+
+    heading, rule, first, second = out.strip().splitlines()[:4]
+    assert heading.split() == ["submission", "exercise", "correct",
+                               "counterexample"]
+    assert set(rule) == {"-", " "}
+    assert first.split() == ["alice.json", "even_as", "yes"]
+    assert second.split() == ["bob.json", "even_as", "no", "aa"]
+
+
+def test_the_rich_table_declines_rather_than_half_drawing():
+    """The import is the capability check and it happens before anything is
+    printed, so a missing library costs a plainer table and never half of one.
+    rich is not a dependency of this project and is not installed here, which
+    is why the plain columns above are what actually runs."""
+    import fsa.cli as cli
+
+    out = io.StringIO()
+    if importlib.util.find_spec("rich") is None:
+        assert cli._rich_summary([], out) is False
+        assert out.getvalue() == ""
+    else:
+        assert cli._rich_summary([], out) is True
+
+
+def test_mark_without_an_output_path_writes_no_file(task, submissions,
+                                                    tmp_path):
+    write_submission(submissions / "alice.json", EVEN_AS)
+    code, out, _ = run("mark", str(task), str(submissions))
+    assert code == OK
+    assert "alice.json" in out
+    assert not list(tmp_path.glob("*.csv"))
+
+
+def test_mark_keeps_the_table_when_the_csv_cannot_be_written(task, submissions,
+                                                             tmp_path):
+    """Exit 2, because the run could not deliver -- but the results are still
+    on stdout, which is the marker's only remaining copy of the work."""
+    write_submission(submissions / "alice.json", EVEN_AS)
+    code, out, err = run("mark", str(task), str(submissions), "-o",
+                         str(tmp_path))       # a directory: not writable as one
+    assert code == USAGE
+    assert "alice.json" in out
+    assert err
+
+
+def test_marking_the_same_directory_twice_gives_the_same_bytes(task,
+                                                               submissions,
+                                                               tmp_path):
+    """So a re-run can be diffed against the last one, which is how a marker
+    finds out what changed after a round of resubmissions."""
+    for index, pattern in enumerate(CORRECT_ANSWERS + ("b*", "(a|b)*")):
+        write_submission(submissions / f"s{index}.json", pattern)
+
+    first, second = tmp_path / "one.csv", tmp_path / "two.csv"
+    assert run("mark", str(task), str(submissions), "-o", str(first))[0] == NO
+    assert run("mark", str(task), str(submissions), "-o", str(second))[0] == NO
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_mark_on_an_empty_directory_exits_two(task, submissions):
+    code, _, err = run("mark", str(task), str(submissions))
+    assert code == USAGE
+    assert "no .json submission here" in err
+
+
+def test_a_path_that_is_not_there_says_so_rather_than_that_it_is_empty(
+        task, tmp_path):
+    """Two failures fixed in two different places: a typo on the command line,
+    and a directory that really is empty."""
+    code, _, err = run("mark", str(task), str(tmp_path / "typo"))
+    assert code == USAGE
+    assert "no such file or directory" in err
+
+
+def test_mark_without_a_readable_exercise_exits_two(tmp_path, submissions):
+    """A directory of exercises that are all broken is a run that cannot
+    start -- as against a broken submission, which is a row."""
+    exercises = tmp_path / "exercises"
+    exercises.mkdir()
+    (exercises / "broken.fsx").write_text("{not json", encoding="utf-8")
+    write_submission(submissions / "alice.json", EVEN_AS)
+
+    code, _, err = run("mark", str(exercises), str(submissions))
+    assert code == USAGE
+    assert "broken.fsx" in err
+    assert "nothing to mark against" in err
+
+
+def test_a_broken_exercise_does_not_stop_the_others(tmp_path, submissions):
+    """The same courtesy a broken submission gets, for the same reason."""
+    exercises = tmp_path / "exercises"
+    exercises.mkdir()
+    write_exercise(exercises, "even_as", EVEN_AS)
+    (exercises / "broken.fsx").write_text("{}", encoding="utf-8")
+    write_submission(submissions / "alice.even_as.json", EVEN_AS)
+
+    code, out, err = run("mark", str(exercises), str(submissions))
+    assert code == OK
+    assert "broken.fsx" in err
+    assert "1 correct" in out
+
+
+def test_marking_the_checked_in_examples(submissions):
+    """The exercises that ship with the project, marked by the tool that ships
+    with them. Nothing here is written by the test but the submission."""
+    write_submission(submissions / "even_as.json", EVEN_AS)
+    write_submission(submissions / "ends_with_01.json", "(0|1)*01")
+
+    code, out, _ = run("mark", "examples", str(submissions))
+    assert code == OK, out
+    assert "2 correct, 0 wrong" in out
+
+
+# ---------------------------------------------------------------------------
 # Plumbing
 # ---------------------------------------------------------------------------
 
@@ -543,7 +1099,7 @@ def test_no_command_prints_help():
 def test_help_lists_every_command():
     code, out, _ = run()
     for command in ("test", "run", "check", "sample", "export", "show", "new",
-                    "from-regex", "to-regex"):
+                    "from-regex", "to-regex", "mark"):
         assert command in out
 
 

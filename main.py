@@ -70,6 +70,11 @@ def _shown_symbol(symbol: Optional[str]) -> str:
 #: Symbols a brand-new document starts with, so the palette is never empty.
 STARTING_ALPHABET = ("a", "b")
 
+#: Where the bundled exercises live, searched when a name typed into the prompt
+#: does not resolve beside the project. Without it, opening a shipped task means
+#: knowing a path nobody has been told.
+EXERCISE_DIRECTORY = "examples"
+
 #: How much of a derived expression the status row will carry. The panel cuts
 #: whatever it is given down to the column width one character and one font
 #: render at a time, so handing over the whole answer would cost a few hundred
@@ -311,6 +316,10 @@ class AutomatonSimulator:
         self._space_panned = False
         self._right_press: Optional[Tuple[int, int]] = None
         self._right_dragged = False
+
+        # The exercise itself lives on the UI manager, which draws it; this is
+        # only what was typed to open it, so the prompt can offer it again.
+        self.exercise_path = ""
 
         self._loop_angle_cache: Dict[str, float] = {}
         # (automaton, expression) for the last derivation, keyed on the value
@@ -655,6 +664,10 @@ class AutomatonSimulator:
             events.TrimAutomaton: lambda _e: self._trim_automaton(),
             events.RegexPrompt: lambda _e: self._show_regex_prompt(),
             events.BuildFromRegex: lambda e: self._build_from_regex(e.pattern),
+            events.ExerciseRequested: lambda _e: self._open_exercise(),
+            events.LoadExercise: lambda e: self._load_exercise(e.path),
+            events.CheckExercise: lambda _e: self._check_exercise(),
+            events.CloseExercise: lambda _e: self._close_exercise(),
             events.FocusStates: lambda e: self._focus_states(list(e.states)),
             events.ShowMessage: lambda e: self._show_message(e.text),
             events.SymbolSelected: self._on_symbol_selected,
@@ -902,10 +915,18 @@ class AutomatonSimulator:
         coordinates cannot be kept: the states are new values, not the old ones
         moved. A run in progress is stopped because its path names states that
         may no longer exist.
+
+        Its *verdict* goes with it, exactly as it does on load. Stopping the run
+        and leaving "'aa' was rejected" in the panel below leaves a sentence
+        about a machine that is no longer on the canvas -- which is at its most
+        misleading in the exercise loop, where the whole flow is: be told a word,
+        watch it fail, fix the machine, and look again.
         """
         document = fsa.Document(automaton, fsa.Layout.auto(automaton),
                                 self.editor.document.next_id)
         self._stop_execution()
+        self.ui_manager.test_result = ""
+        self.ui_manager.test_verdict = ""
         self.editor.apply(document, action=action)
         self._after_edit()
         self._fit_to_content()
@@ -1151,7 +1172,7 @@ class AutomatonSimulator:
         ])
 
     def _show_general_context_menu(self, pos: Tuple[int, int]) -> None:
-        self.ui_manager.show_context_menu(pos, [
+        items = [
             MenuItem("Add state here", events.AddStateAt(self._world(pos))),
             MenuItem(SEPARATOR),
             MenuItem("Determinize", events.DeterminizeAutomaton()),
@@ -1164,8 +1185,17 @@ class AutomatonSimulator:
             # return trip.
             MenuItem("From regular expression...", events.RegexPrompt()),
             MenuItem(SEPARATOR),
-            MenuItem("Fit to content", events.FitView()),
-        ])
+            MenuItem("Open an exercise...", events.ExerciseRequested()),
+        ]
+        # Checking and closing appear only while there is something to check or
+        # close. A menu that offers to grade an answer against no question is
+        # offering an action whose only outcome is a complaint.
+        if self.ui_manager.exercise is not None:
+            items += [MenuItem("Check my answer", events.CheckExercise()),
+                      MenuItem("Close the exercise", events.CloseExercise())]
+        items += [MenuItem(SEPARATOR),
+                  MenuItem("Fit to content", events.FitView())]
+        self.ui_manager.show_context_menu(pos, items)
 
 
     # ------------------------------------------------------------------
@@ -1239,6 +1269,143 @@ class AutomatonSimulator:
             self.ui_manager.show_confirm("Quit without saving?", 'quit_after_confirm')
         else:
             self.running = False
+
+    # ------------------------------------------------------------------
+    # Exercises
+    # ------------------------------------------------------------------
+
+    def _open_exercise(self) -> None:
+        """Ask which exercise to open, on the prompt Load already uses.
+
+        Pre-filled with the last one opened, because the thing somebody types
+        this into twice in a row is usually the same name -- unlike the regex
+        prompt, where the pre-fill would be forty characters of somebody
+        else's answer to clear first.
+        """
+        self.ui_manager.show_file_prompt('exercise', self.exercise_path)
+
+    def _resolve_exercise_path(self, filename: str) -> str:
+        """Where an exercise named in the prompt is looked for.
+
+        ``.fsx`` rather than ``.json``, and the bundled directory is searched
+        when the name does not resolve beside the project -- so ``even_as``
+        opens the shipped example without anyone having to know it lives under
+        ``examples/``. When neither exists the *first* path comes back, so the
+        error names the file the user meant rather than one they never asked
+        for.
+        """
+        filename = filename.strip()
+        if not os.path.splitext(filename)[1]:
+            filename += fsa.exercise.EXTENSION
+        if os.path.isabs(filename):
+            return filename
+
+        beside = os.path.normpath(os.path.join(PROJECT_DIR, filename))
+        if os.path.exists(beside):
+            return beside
+        bundled = os.path.normpath(
+            os.path.join(PROJECT_DIR, EXERCISE_DIRECTORY, filename))
+        return bundled if os.path.exists(bundled) else beside
+
+    def _load_exercise(self, filename: str) -> None:
+        """Open a task and put its prompt on screen.
+
+        The document is not touched. A student may already have half an answer
+        drawn, and opening the question is not a reason to throw it away -- the
+        one exception being the alphabet, below, which the exercise declares
+        and which nothing can be drawn without.
+        """
+        path = self._resolve_exercise_path(filename)
+        task, error = fsa.exercise.load_or_error(path)
+        if task is None:
+            self._show_message(f"Could not open the exercise: {error}")
+            return
+
+        # The name as typed, not the resolved path: it is what goes back into
+        # the prompt next time, and `examples/even_as.fsx` is not what was
+        # typed to get here.
+        self.exercise_path = filename.strip()
+        self.ui_manager.show_exercise(task)
+
+        added = self._adopt_exercise_alphabet(task)
+        if added:
+            self._show_message(
+                f"{task.name()} -- added {', '.join(added)} to the alphabet")
+        else:
+            self._show_message(f"Exercise: {task.name()}")
+
+    def _adopt_exercise_alphabet(self, task: fsa.Exercise) -> List[str]:
+        """Give the canvas every letter the exercise is set over.
+
+        A task over ``{0, 1}`` opened on a document over ``{a, b}`` cannot be
+        answered at all until those two symbols exist: there is nothing to
+        label an arrow with. So they are added, through the ordinary editing
+        path -- undoable, and marking the document changed, because it *has*
+        changed.
+
+        Nothing is taken away. A symbol already on the canvas may be carrying
+        transitions, and silently deleting those to tidy the palette would edit
+        somebody's answer on their behalf. A machine drawn over a letter the
+        task never mentioned is wrong for a reason
+        :func:`fsa.exercise.check` explains in the sentence it hands back,
+        which is a better teacher than a disappearing arrow.
+        """
+        missing = sorted(task.alphabet - self.editor.automaton.alphabet)
+        added = [symbol for symbol in missing if self.editor.add_symbol(symbol)]
+        if added:
+            self._after_edit()
+        return added
+
+    def _close_exercise(self) -> None:
+        self.ui_manager.hide_exercise()
+        self._show_message("Exercise closed")
+
+    def _check_exercise(self) -> None:
+        """Grade the canvas, then run the word that proves it wrong.
+
+        The last step is the feature. `IMPROVEMENT_PLAN.md` cites a study in
+        which a weaker cohort beat a stronger one at building automata for one
+        reason: they were handed counterexample strings when they were wrong.
+        A sentence naming the word is most of that; putting the word in the
+        test field and starting the run is the rest, because the student then
+        watches their own machine walk the wrong path rather than reading that
+        it would.
+
+        Nothing here decides what "correct" means. That is
+        :func:`fsa.exercise.check`, which compares languages and hands back the
+        sentence as well as the verdict -- so the phrasing the study is about
+        is written once, in the engine, and this method does not get to
+        paraphrase it.
+        """
+        task = self.ui_manager.exercise
+        if task is None:
+            self._show_message("No exercise is open")
+            return
+
+        # Held rather than re-read: the verdict is recorded against the exact
+        # value it was reached about, so the panel can drop the sentence the
+        # moment the machine underneath it changes.
+        automaton = self.editor.automaton
+        result = fsa.exercise.check(automaton, task)
+        self.ui_manager.set_exercise_result(result.message, result.correct,
+                                            automaton)
+
+        if result.correct:
+            self._show_message(f"Correct -- {task.name()}")
+            return
+
+        if result.counterexample is None:
+            # A submission with no start state: wrong, and with no word to
+            # prove it, because it has no language for a word to be compared
+            # against. The message says what to do about that instead.
+            self._show_message(result.message)
+            return
+
+        # Into the field first, so the string the run is about is visible in
+        # the place the student would have typed it themselves.
+        self.ui_manager.input_text = result.counterexample
+        self._test_string(result.counterexample)
+        self._show_message(result.message)
 
     # ------------------------------------------------------------------
     # Execution

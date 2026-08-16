@@ -3,12 +3,12 @@
 Exit codes are the interesting part, because they are what makes this usable
 from a shell script or an autograder without parsing anything:
 
-    0   the answer is yes -- accepted, or no defects found
-    1   the answer is no  -- rejected, or defects found
+    0   the answer is yes -- accepted, no defects found, every submission right
+    1   the answer is no  -- rejected, defects found, a submission wrong
     2   the question was wrong -- bad usage, missing file, unreadable document
 
 So ``fsa test machine.json 0110 && echo yes`` works, and a marking loop can run
-``fsa check submission.json`` and branch on the status.
+``fsa check submission.json --against task.fsx`` and branch on the status.
 
 Everything a command prints goes to stdout; everything about a *failure to run*
 goes to stderr. Nothing here imports pygame, so the CLI works on a machine with
@@ -16,12 +16,13 @@ no display and no graphics stack.
 """
 
 import argparse
+import csv
 import os
 import sys
-from typing import FrozenSet, List, Optional, Sequence, TextIO, Tuple
+from typing import FrozenSet, List, NamedTuple, Optional, Sequence, TextIO, Tuple
 
 import fsa
-from fsa import analysis, language, regex, serialize
+from fsa import analysis, exercise, language, regex, serialize
 from fsa.export import FORMATS, render
 from fsa.nfa import EPSILON
 from fsa.symbols import StateId, Symbol
@@ -56,6 +57,19 @@ _SENTINELS: Tuple[Tuple[str, str, str], ...] = (
     (regex.EMPTY_WORD, EPSILON_ASCII, "U+03B5, the empty word"),
     (regex.EMPTY_LANGUAGE, EMPTY_LANGUAGE_ASCII, "U+2205, the empty language"),
 )
+
+#: The three answers the ``correct`` column of a marking run can hold. A
+#: submission that would not open is neither right nor wrong: calling it "no"
+#: would report a mistake about a language nobody made, and a marker who sorts
+#: the column wants the unreadable files in a pile of their own to go and look
+#: at rather than mixed in with the students who got it wrong.
+MARK_CORRECT = "yes"
+MARK_WRONG = "no"
+MARK_ERROR = "error"
+
+#: The extension a submission is expected to have -- the same documents every
+#: other verb here reads.
+SUBMISSION_EXTENSION = ".json"
 
 
 # ----------------------------------------------------------------------
@@ -210,7 +224,22 @@ def cmd_run(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
 
 def cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    """Report structural problems with an automaton."""
+    """Report structural problems with an automaton, or grade it.
+
+    Two questions under one verb, and ``--against`` chooses which: without it,
+    "is this machine well formed?"; with it, "is this machine the answer?".
+    They are the same verb because they are the same act -- running the tool
+    over someone's work to find out what is wrong with it -- and because the
+    exit code means the same thing either way, so the marking loop that already
+    says ``fsa check submission.json || retry`` keeps working when the marker
+    starts pointing it at an exercise.
+
+    The grading half lives in the Grading section below: it shares everything
+    it knows with :func:`cmd_mark`, and nothing with the defect report.
+    """
+    if args.against is not None:
+        return _graded(args, out, err)
+
     loaded = _load_dfa(args.file, err)
     if loaded is None:
         return USAGE
@@ -362,6 +391,386 @@ def cmd_equiv(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         verdict = "accepts" if fsa.accepts(automaton, witness) else "rejects"
         print(f"  {name} {verdict} it", file=out)
     return NO
+
+
+# ----------------------------------------------------------------------
+# Grading
+#
+# ``check --against`` and ``mark`` are one feature at two scales: a student
+# asking about their own machine, and a marker asking about a class of them.
+# Both are :func:`fsa.exercise.check`, whose answer carries the shortest word
+# that tells the submission and the reference apart. That word is the feature.
+# Being told a machine is wrong teaches nothing; being told it accepts 'bb'
+# when the answer rejects it points at an arrow.
+#
+# So the CLI's job here is small and it is mostly about not losing things:
+# print the sentence :mod:`fsa.exercise` already wrote, keep the exit code
+# meaning what it means everywhere else, and make sure one unreadable file in a
+# directory of twenty costs one row rather than nineteen marks.
+# ----------------------------------------------------------------------
+
+def _load_exercise(path: str, err: TextIO) -> Optional[exercise.Exercise]:
+    """An exercise, or ``None`` with the reason already printed.
+
+    The :func:`_load` of the other format. ``load_or_error`` catches the regex
+    parser's error too -- it is an :class:`~fsa.errors.AutomatonError` -- so a
+    typo in a reference pattern arrives here as a sentence rather than a
+    traceback out of the middle of a marking run.
+    """
+    task, error = exercise.load_or_error(path)
+    if task is None:
+        print(f"{PROGRAM}: {path}: {error}", file=err)
+    return task
+
+
+def _graded(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """``fsa check submission.json --against task.fsx``.
+
+    Reads the submission with :func:`_load` rather than :func:`_load_dfa`,
+    because a student may legitimately hand in an NFA: the exercise asked for a
+    machine recognising a language, and :func:`fsa.exercise.check` determinises
+    whatever it is given. Refusing it here would fail an answer that is right.
+
+    A submission with no initial state exits 1, not 2. The file opened and the
+    question was asked; the answer is that it is not the reference. That is a
+    wrong answer with a remedy printed, not a broken invocation.
+    """
+    task = _load_exercise(args.against, err)
+    if task is None:
+        return USAGE
+    document = _load(args.file, err)
+    if document is None:
+        return USAGE
+
+    result = exercise.check(document.automaton, task)
+    # Which exercise was used, then the verdict. The name first because a
+    # marking loop over several tasks prints many of these and "correct" with
+    # nothing above it says nothing about what was correct.
+    print(task.name(), file=out)
+    # Printed exactly as `fsa.exercise` wrote it. That module spells the empty
+    # word "the empty word" -- the commonest counterexample there is, and the
+    # one whose obvious spelling ('') reads like a bug in the marker -- so
+    # there is no epsilon to fall back from here. See `_cell_word` for the
+    # table, where the same word is a cell rather than a sentence.
+    print(result.message, file=out)
+    return OK if result.correct else NO
+
+
+class Row(NamedTuple):
+    """One marked submission: one line of the CSV, one line of the table.
+
+    The field names are the CSV header, so the columns cannot drift out of step
+    with what is written under them.
+
+    ``counterexample`` holds the word verbatim, which means the empty word --
+    again, the commonest one there is -- lands in the same empty cell as "there
+    was no counterexample". ``attempt`` is what tells them apart: it is
+    ``accepts`` or ``rejects`` when there is a word and empty when there is
+    not, which is exactly the invariant :class:`fsa.exercise.Result` promises
+    about ``attempt_accepts``. It earns its place twice over, because it is
+    also the column a marker scans to see whether a cohort is over-accepting or
+    under-accepting.
+    """
+
+    submission: str
+    exercise: str
+    correct: str
+    counterexample: str
+    attempt: str
+    message: str
+
+
+def _files(root: str, extension: str) -> List[str]:
+    """Every file at or under ``root`` with this extension, sorted.
+
+    A single file is a legal root, so ``fsa mark task.fsx submissions/`` works
+    without a directory holding one exercise. The walk is recursive because
+    ``submissions/<exercise>/<student>.json`` is a layout a marker will already
+    have -- and it is the layout :func:`_matching` reads to decide which task a
+    submission answers. Sorted, so two runs over one directory produce byte-
+    identical CSVs and a marker can diff a re-run.
+    """
+    if os.path.isfile(root):
+        return [root]
+    found: List[str] = []
+    for directory, _subdirectories, names in os.walk(root):
+        found.extend(os.path.join(directory, name) for name in names
+                     if name.lower().endswith(extension))
+    return sorted(found)
+
+
+def _grading_files(root: str, extension: str, noun: str,
+                   err: TextIO) -> Optional[List[str]]:
+    """What :func:`_files` found, or ``None`` with the reason printed.
+
+    Two failures, told apart because they are fixed differently: a path that is
+    not there at all is a typo on the command line, and a path that is there
+    with nothing of this kind under it is a marker pointing at the wrong
+    directory -- or at a set of submissions saved under some other extension.
+    """
+    if not os.path.exists(root):
+        print(f"{PROGRAM}: {root}: no such file or directory", file=err)
+        return None
+    found = _files(root, extension)
+    if not found:
+        print(f"{PROGRAM}: {root}: no {extension} {noun} here", file=err)
+        return None
+    return found
+
+
+def _stem(path: str) -> str:
+    """``exercises/even_as.fsx`` -> ``even_as``, the name an exercise goes by."""
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _shown(path: str, root: str) -> str:
+    """How a submission is named in the results: its path below ``root``.
+
+    Relative, so a marker's home directory does not end up in a file they send
+    on, and with forward slashes on every platform, so the CSV a Windows marker
+    produces and the one CI produces are the same bytes.
+    """
+    return os.path.relpath(path, root or ".").replace(os.sep, "/")
+
+
+def _matching(shown: str, tasks: Sequence[Tuple[str, exercise.Exercise]],
+              ) -> Optional[Tuple[str, exercise.Exercise]]:
+    """The exercise a submission answers, by name, or ``None``.
+
+    One exercise is the common case -- one task, twenty students -- and then
+    there is nothing to decide. With several, the pairing is by name: the
+    exercise's stem has to appear somewhere in the submission's path, so
+    ``submissions/even_as/alice.json`` and ``submissions/alice.even_as.json``
+    both find ``exercises/even_as.fsx``. The longest match wins, so an exercise
+    called ``even`` cannot steal a submission from ``even_as``.
+
+    A submission that matches nothing gets a row saying so rather than a mark.
+    Guessing would hand a student a counterexample to a question they were not
+    answering, which is worse than no feedback: it is confident feedback about
+    the wrong thing.
+    """
+    if len(tasks) == 1:
+        return tasks[0]
+
+    haystack = shown.lower()
+    best: Optional[Tuple[str, exercise.Exercise]] = None
+    for stem, task in tasks:
+        if stem.lower() in haystack and (best is None or len(stem) > len(best[0])):
+            best = (stem, task)
+    return best
+
+
+def _mark_one(path: str, shown: str,
+              tasks: Sequence[Tuple[str, exercise.Exercise]],
+              err: TextIO) -> Row:
+    """Mark one submission. Returns a row for every outcome, including failure.
+
+    This is the function that makes ``mark`` usable on real submissions: a file
+    that will not open is one row saying so, not an exception that abandons the
+    other nineteen students. Everything that can go wrong with someone else's
+    file -- missing, truncated, saved from the wrong program, an automaton the
+    engine refuses -- comes back as a row and a line on stderr.
+    """
+    pairing = _matching(shown, tasks)
+    if pairing is None:
+        reason = ("no exercise's name appears in this submission's path, so "
+                  "there is nothing to mark it against")
+        print(f"{PROGRAM}: {shown}: {reason}", file=err)
+        return Row(shown, "", MARK_ERROR, "", "", reason)
+    stem, task = pairing
+
+    document, error = serialize.load_or_error(path)
+    if document is None:
+        print(f"{PROGRAM}: {shown}: {error}", file=err)
+        return Row(shown, stem, MARK_ERROR, "", "", error)
+
+    try:
+        result = exercise.check(document.automaton, task)
+    except fsa.AutomatonError as exc:
+        # The engine raises this for anything it refuses, and the whole point
+        # of the verb is that one hostile file costs one row.
+        print(f"{PROGRAM}: {shown}: {exc}", file=err)
+        return Row(shown, stem, MARK_ERROR, "", "", str(exc))
+
+    return Row(
+        submission=shown,
+        exercise=stem,
+        correct=MARK_CORRECT if result.correct else MARK_WRONG,
+        # Verbatim, including "" for the empty word; `attempt` is what says
+        # which of the two blanks this is. See :class:`Row`.
+        counterexample=result.counterexample or "",
+        attempt=("" if result.attempt_accepts is None else
+                 "accepts" if result.attempt_accepts else "rejects"),
+        message=result.message,
+    )
+
+
+def _cell_word(row: Row, empty: str) -> str:
+    """The counterexample as a table cell rather than as a sentence.
+
+    ``ε`` here, where :mod:`fsa.exercise` writes "the empty word": in a column
+    four characters wide a sentence does not fit, and this is the same spelling
+    ``sample`` and ``show`` already use for the same thing -- with the same
+    ASCII fallback, since the terminal that cannot encode it is the one this
+    project runs on.
+
+    Keyed off ``attempt``, not off the word, because a blank word means either
+    "the empty word" or "no word at all" and only one of those is a cell to
+    fill in.
+    """
+    if not row.attempt:
+        return ""
+    return row.counterexample or empty
+
+
+def _totals(rows: Sequence[Row]) -> str:
+    """The line under the table: how many, and how they went.
+
+    The third bucket is named only when it is not empty. A marker whose files
+    all opened should not have to read the word "unmarkable" to find that out.
+    """
+    correct = sum(1 for row in rows if row.correct == MARK_CORRECT)
+    wrong = sum(1 for row in rows if row.correct == MARK_WRONG)
+    failed = sum(1 for row in rows if row.correct == MARK_ERROR)
+
+    line = (f"{len(rows)} submission{'' if len(rows) == 1 else 's'}: "
+            f"{correct} correct, {wrong} wrong")
+    if failed:
+        line += f", {failed} could not be marked"
+    return line
+
+
+#: The columns of the printed summary. Not every column of the CSV: the message
+#: is a sentence and would wrap a terminal into uselessness, and the marker who
+#: wants it opens the file this verb just wrote.
+SUMMARY_COLUMNS = ("submission", "exercise", "correct", "counterexample")
+
+
+def _summary_cells(rows: Sequence[Row], out: TextIO) -> List[Tuple[str, ...]]:
+    """The table's body, as text, however it is about to be drawn."""
+    empty = _epsilon_for(out)
+    return [(row.submission, row.exercise, row.correct, _cell_word(row, empty))
+            for row in rows]
+
+
+def _rich_summary(rows: Sequence[Row], out: TextIO) -> bool:
+    """Draw the summary with ``rich``, or answer ``False`` having drawn nothing.
+
+    Optional, and the import is the capability check. ``rich`` is not a
+    dependency of this project and is not installed on the machine it is
+    developed on, so :func:`_plain_summary` is the path that actually runs and
+    the path the tests exercise; this one is a nicety for a terminal that has
+    it. Nothing below the import may fail, or a missing library would cost half
+    a table instead of a plainer one.
+    """
+    try:
+        from rich.console import Console
+        from rich.table import Table
+    except ImportError:
+        return False
+
+    table = Table(box=None, pad_edge=False)
+    for heading in SUMMARY_COLUMNS:
+        table.add_column(heading, overflow="fold")
+    for cells in _summary_cells(rows, out):
+        table.add_row(*cells)
+    Console(file=out).print(table)
+    return True
+
+
+def _plain_summary(rows: Sequence[Row], out: TextIO) -> None:
+    """The same table in columns, for a terminal without ``rich``.
+
+    Two spaces between columns and an ASCII rule under the headings, the same
+    shape ``run`` and ``show`` print, so the tool looks like one tool. Widths
+    come from the content, so a directory of short names does not get a table
+    padded out to the width of a path nobody has.
+    """
+    cells = _summary_cells(rows, out)
+    widths = [max(len(heading),
+                  max((len(row[column]) for row in cells), default=0))
+              for column, heading in enumerate(SUMMARY_COLUMNS)]
+
+    def line(values: Sequence[str]) -> str:
+        # Right-stripped: a trailing run of spaces after the last column is
+        # invisible until someone diffs the output or pastes it somewhere.
+        return "  ".join(value.ljust(width)
+                         for value, width in zip(values, widths)).rstrip()
+
+    print(line(SUMMARY_COLUMNS), file=out)
+    print(line(["-" * width for width in widths]), file=out)
+    for row in cells:
+        print(line(row), file=out)
+
+
+def _write_csv(rows: Sequence[Row], path: str, out: TextIO, err: TextIO) -> bool:
+    """Write the marking rows where a marker can open them.
+
+    ``newline=""`` is required by the :mod:`csv` module, which writes its own
+    line endings: without it every row on Windows ends ``\\r\\r\\n``. UTF-8
+    because a symbol is any character a student's alphabet contains, and the
+    counterexample column is made of those.
+    """
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(Row._fields)
+            writer.writerows(rows)
+    except OSError as exc:
+        print(f"{PROGRAM}: {path}: {exc.strerror or exc}", file=err)
+        return False
+    print(f"wrote {path}", file=out)
+    return True
+
+
+def cmd_mark(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Grade a directory of submissions against one or more exercises.
+
+    Exit 0 when every submission is correct, 1 when any is wrong or would not
+    open, and 2 when the run could not start at all -- no exercise, no
+    submission, or a CSV that could not be written. So ``fsa mark exercises/
+    submissions/ && echo all passed`` says something true, and an unreadable
+    file is a "no" rather than a "could not run": the run happened, and the
+    answer for that student is not yet correct.
+
+    The table goes to stdout before the CSV is written, so a marker whose
+    output path was wrong still has the results in front of them.
+    """
+    exercise_paths = _grading_files(args.exercises, exercise.EXTENSION,
+                                    "exercise", err)
+    if exercise_paths is None:
+        return USAGE
+
+    # A broken exercise is reported and skipped rather than fatal, for the
+    # reason a broken submission is: the other tasks are still markable.
+    tasks: List[Tuple[str, exercise.Exercise]] = []
+    for path in exercise_paths:
+        task = _load_exercise(path, err)
+        if task is not None:
+            tasks.append((_stem(path), task))
+    if not tasks:
+        print(f"{PROGRAM}: no exercise loaded, so there is nothing to mark "
+              f"against", file=err)
+        return USAGE
+
+    submissions = _grading_files(args.submissions, SUBMISSION_EXTENSION,
+                                 "submission", err)
+    if submissions is None:
+        return USAGE
+
+    root = (args.submissions if os.path.isdir(args.submissions)
+            else os.path.dirname(args.submissions))
+    rows = [_mark_one(path, _shown(path, root), tasks, err)
+            for path in submissions]
+
+    if not _rich_summary(rows, out):
+        _plain_summary(rows, out)
+    print("", file=out)
+    print(_totals(rows), file=out)
+
+    if args.output is not None and not _write_csv(rows, args.output, out, err):
+        return USAGE
+    return OK if all(row.correct == MARK_CORRECT for row in rows) else NO
 
 
 def cmd_from_regex(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
@@ -634,8 +1043,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument("word")
     run_cmd.set_defaults(handler=cmd_run)
 
-    check = subs.add_parser("check", help="report structural problems")
+    check = subs.add_parser("check", help="report structural problems, or grade")
     check.add_argument("file")
+    check.add_argument("--against", metavar="EXERCISE",
+                       help=f"grade against an exercise ({exercise.EXTENSION}) "
+                            f"instead: exit 0 when the language is right, 1 "
+                            f"when it is not, and say which word proves it")
     check.set_defaults(handler=cmd_check)
 
     sample = subs.add_parser("sample", help="list accepted words")
@@ -670,6 +1083,19 @@ def build_parser() -> argparse.ArgumentParser:
     equiv.add_argument("left")
     equiv.add_argument("right")
     equiv.set_defaults(handler=cmd_equiv)
+
+    mark = subs.add_parser(
+        "mark", help="grade a directory of submissions against exercises")
+    mark.add_argument("exercises",
+                      help=f"an exercise ({exercise.EXTENSION}) or a directory "
+                           f"of them")
+    mark.add_argument("submissions",
+                      help=f"a submission ({SUBMISSION_EXTENSION}) or a "
+                           f"directory of them, searched recursively")
+    mark.add_argument("-o", "--output", metavar="RESULTS.CSV",
+                      help="write the rows here as CSV as well as summarising "
+                           "them on stdout")
+    mark.set_defaults(handler=cmd_mark)
 
     from_regex = subs.add_parser(
         "from-regex", help="build the machine a regular expression denotes")

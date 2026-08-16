@@ -59,7 +59,8 @@ def row_height(lines: int) -> int:
     return max(1, lines) * LINE_HEIGHT + ROW_PADDING
 
 
-def wrap(font: pygame.font.Font, message: str, budget: int) -> List[str]:
+def wrap(font: pygame.font.Font, message: str, budget: int,
+         *, limit: int = MAX_LINES) -> List[str]:
     """Break a defect message into lines that fit.
 
     Wrapping rather than truncating, because the tail of these messages is the
@@ -67,7 +68,14 @@ def wrap(font: pygame.font.Font, message: str, budget: int) -> List[str]:
     sentence explaining that a missing arrow rejects a string for a reason that
     has nothing to do with the language. Cutting that off leaves a warning with
     the lesson removed.
+
+    ``limit`` caps the lines produced. It is a parameter rather than the
+    constant it used to be because the other readers of this function are not
+    rows in this panel: the marking table's explanation and the exercise
+    panel's prompt have their own idea of how much room a thing deserves, and
+    a second wrapper for a width is exactly the kind of duplicate that drifts.
     """
+    limit = max(1, limit)
     lines: List[str] = []
     current = ""
     for word in message.split():
@@ -77,14 +85,14 @@ def wrap(font: pygame.font.Font, message: str, budget: int) -> List[str]:
             continue
         lines.append(current)
         current = word
-        if len(lines) == MAX_LINES:
+        if len(lines) == limit:
             break
-    if current and len(lines) < MAX_LINES:
+    if current and len(lines) < limit:
         lines.append(current)
 
     # Only the very last line may be elided, and only when the message is
     # genuinely longer than the row can ever show.
-    if len(lines) == MAX_LINES and font.size(lines[-1])[0] > budget:
+    if len(lines) == limit and font.size(lines[-1])[0] > budget:
         while lines[-1] and font.size(lines[-1] + "...")[0] > budget:
             lines[-1] = lines[-1][:-2]
         lines[-1] += "..."

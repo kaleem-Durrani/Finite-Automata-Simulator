@@ -60,6 +60,38 @@ class LoadFromPath(UiEvent):
 
 
 @dataclass(frozen=True)
+class ExerciseRequested(UiEvent):
+    """Ask which exercise to open. Opens the prompt; grades nothing.
+
+    Split from :class:`LoadExercise` the way :class:`SaveRequested` is split
+    from :class:`SaveToPath`: choosing a menu item and naming a file are two
+    requests, and a file that will not open must not have counted as the first.
+    """
+
+
+@dataclass(frozen=True)
+class LoadExercise(UiEvent):
+    """Open the exercise at ``path`` and put its prompt on screen."""
+
+    path: str
+
+
+@dataclass(frozen=True)
+class CheckExercise(UiEvent):
+    """Grade the machine on the canvas against the open exercise.
+
+    Carries nothing: both the submission and the task are already the
+    application's, and passing either through the interface would be a second
+    copy of a value with its own chance to be the stale one.
+    """
+
+
+@dataclass(frozen=True)
+class CloseExercise(UiEvent):
+    """Put the exercise away. The machine on the canvas is untouched."""
+
+
+@dataclass(frozen=True)
 class ToggleTheme(UiEvent):
     pass
 

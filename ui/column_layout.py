@@ -87,7 +87,8 @@ def status_body_height(*, warn_no_accepting: bool) -> int:
 
 def compute(state: ColumnState, *, layout: LayoutSpec, theme: Theme,
             execution_active: bool, legend_rows: int,
-            diagnostics_height: int, warn_no_accepting: bool) -> Column:
+            diagnostics_height: int, exercise_height: int,
+            warn_no_accepting: bool) -> Column:
     """Lay out the right-hand panels for this frame.
 
     Deterministic from current state -- panel heights depend only on content
@@ -106,6 +107,12 @@ def compute(state: ColumnState, *, layout: LayoutSpec, theme: Theme,
     limit = layout.column_limit()
 
     wanted = [
+        # First in the column, because it is the only panel that says what the
+        # user is trying to *do*. Everything below it describes what is already
+        # on the canvas, and a task read under its own answer is a task read
+        # too late. Zero height means no exercise is open, and the panel is
+        # left out rather than drawn empty.
+        ("exercise", exercise_height > 0, exercise_height),
         ("status", True, status_body_height(warn_no_accepting=warn_no_accepting)),
         ("run", execution_active, RUN_BODY_HEIGHT),
         # The diagnostics panel measures its own wrapped text and passes the

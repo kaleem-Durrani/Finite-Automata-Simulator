@@ -23,6 +23,7 @@ from ui.widgets import Chrome, card, chevron
 #: it doubles as the notch's label: folding a panel away must not cost the user
 #: the knowledge of what is inside it.
 PANEL_TITLES = {
+    "exercise": "Exercise",
     "status": "Automaton",
     "run": "Run",
     "diagnostics": "Diagnostics",

@@ -188,7 +188,7 @@ Closes Kleene's theorem. With Phase 12 in place this is mostly construction.
 
 ---
 
-### Phase 14 — Exercises and self-grading · 8h
+### Phase 14 — Exercises and self-grading · 8h ✅
 
 The highest value per hour in this document, because the hard parts are already
 written. `IMPROVEMENT_PLAN.md` cites the DAVID study: the weaker cohort beat the

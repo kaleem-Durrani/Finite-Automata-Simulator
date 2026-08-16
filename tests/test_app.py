@@ -27,6 +27,7 @@ from rendering.scene import NodeKind
 from ui import context_menu, dialogs, events, layout_spec
 from ui.panels import column as column_module
 from ui.panels import diagnostics as diagnostics_panel
+from ui.panels import exercise_panel as exercise_panel_module
 from ui.panels import run_panel as run_panel_module
 
 
@@ -2929,3 +2930,400 @@ def test_a_machine_names_an_expression_that_builds_the_same_machine_back(app):
     second = fsa.determinize(app.editor.automaton)
 
     assert fsa.equivalent(first, second), fsa.counterexample(first, second)
+
+
+# ---------------------------------------------------------------------------
+# Phase 14: exercises and self-grading
+# ---------------------------------------------------------------------------
+
+#: A task whose reference is a pattern, as the shipped ones are. Written into
+#: tmp_path per test rather than read from examples/, because the fixture
+#: repoints PROJECT_DIR there -- and a test that depended on a checked-in file
+#: would fail for whoever edited its prompt.
+EVEN_AS = {
+    "version": 1,
+    "kind": "exercise",
+    "title": "An even number of a's",
+    "prompt": ("Build a DFA over {a, b} that accepts exactly those words "
+               "containing an even number of a's. Zero is even, so the empty "
+               "word is accepted, and there is no bound on the b's."),
+    "alphabet": ["a", "b"],
+    "reference": {"regex": "b*(ab*ab*)*"},
+    "examples": {"accept": ["", "b", "aa"], "reject": ["a", "ba"]},
+}
+
+
+def write_exercise(directory, name="even_as.fsx", **overrides):
+    """Put an exercise file where the application will look for it."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_text(json.dumps({**EVEN_AS, **overrides}),
+                                  encoding="utf-8")
+    return name
+
+
+def empty_canvas_point(app):
+    """A screen point that is neither a state nor a panel."""
+    for fraction in (0.34, 0.44, 0.54, 0.64, 0.74):
+        pos = (int(app.screen.get_width() * 0.30),
+               int(app.screen.get_height() * fraction))
+        if app._state_at(pos) is None and not app.ui_manager.is_over_ui(pos):
+            return pos
+    raise AssertionError("nowhere on this canvas is empty")
+
+
+def choose_menu_item(app, label):
+    """Click a row of the open context menu, found by its label."""
+    menu = app.ui_manager.context_menu
+    index = next(i for i, item in enumerate(menu.items) if item.label == label)
+    click(app, (menu.position[0] + 20,
+                menu.position[1] + index * context_menu.CONTEXT_MENU_ITEM_HEIGHT
+                + context_menu.CONTEXT_MENU_ITEM_HEIGHT // 2))
+
+
+def open_exercise(app, name="even_as"):
+    """Open an exercise the way a student does: the menu, then the prompt."""
+    click(app, empty_canvas_point(app), button=3)
+    choose_menu_item(app, "Open an exercise...")
+    assert app.ui_manager.file_prompt_mode == "exercise", "the prompt is reused"
+
+    for _ in range(60):
+        press(app, pygame.K_BACKSPACE)
+    for char in name:
+        press(app, ord(char), char)
+    press(app, pygame.K_RETURN, "\r")
+    pump(app, frames=24)          # let the panel finish sliding in
+
+
+def exercise_content(app):
+    """Exactly the lines the exercise panel will blit this frame."""
+    manager = app.ui_manager
+    return exercise_panel_module.measure(
+        manager.chrome, exercise=manager.exercise,
+        message=manager.exercise_message, width=layout_spec.PANEL_WIDTH)
+
+
+def exercise_panel_rect(app):
+    return next((rect for key, rect, _t in app.ui_manager._column
+                 if key == "exercise"), None)
+
+
+def test_opening_an_exercise_shows_its_prompt(app, tmp_path):
+    """Phase 14 exit criterion, first half: the task is on screen, in prose,
+    while there is still a canvas to draw the answer on."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+
+    manager = app.ui_manager
+    assert manager.exercise is not None
+    assert exercise_panel_rect(app) is not None, "the panel took a column slot"
+
+    drawn = " ".join(exercise_content(app).prompt)
+    assert "even number of a's" in drawn
+    assert "Zero is even" in drawn, "not truncated to the first line"
+
+
+def test_the_exercise_panel_shows_the_examples_and_spells_the_empty_word(app,
+                                                                        tmp_path):
+    """A bare pair of quotes in a list of words reads like a defect in the
+    tool. The engine spells the empty word out in its messages; so does the
+    panel."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+
+    rows = dict(exercise_content(app).examples)
+    assert "the empty word" in rows["accepts"]
+    assert "'a'" in rows["rejects"]
+
+
+def test_the_exercise_panel_folds_away_like_the_others(app, tmp_path):
+    """Every resident of the right column is an accordion, and the header
+    stays behind as the notch that says an exercise is open at all."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+
+    header = app.ui_manager.layout.panel_header(exercise_panel_rect(app))
+    click(app, header.center)
+    pump(app, frames=24)
+
+    assert app.ui_manager.column_state.is_collapsed("exercise") is True
+    assert exercise_panel_rect(app) is not None, "the notch is still there"
+    assert app.ui_manager._exercise_check is None, "and its body is gone"
+
+    click(app, app.ui_manager.layout.panel_header(
+        exercise_panel_rect(app)).center)
+    pump(app, frames=24)
+    assert app.ui_manager.column_state.is_collapsed("exercise") is False
+
+
+def test_the_check_button_is_drawn_inside_its_own_panel(app, tmp_path):
+    """It is anchored to the bottom of the body and everything else flows into
+    what is left, so a long prompt cannot push the only way to hand the answer
+    in off the panel."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+
+    check = app.ui_manager._exercise_check
+    assert check is not None
+    assert exercise_panel_rect(app).contains(check)
+
+
+def test_a_wrong_answer_names_the_word_and_runs_it(app, tmp_path):
+    """Phase 14 exit criterion 4, and the whole point of the feature: failing
+    an exercise puts the counterexample in the test field and runs it, so the
+    student watches their own machine take the wrong path instead of reading
+    that it would."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+
+    # A plausible wrong answer: "the words with no a's at all".
+    app._process_ui_events([events.BuildFromRegex("b*")])
+    pump(app, frames=6)
+
+    click(app, app.ui_manager._exercise_check.center)
+    pump(app, frames=6)
+
+    manager = app.ui_manager
+    assert manager.exercise_verdict == "wrong"
+    # Which word, and which side accepts it. Both halves, literally: "your
+    # machine is wrong" points at nothing.
+    assert "'aa'" in manager.exercise_message
+    assert "your machine rejects" in manager.exercise_message
+    assert "the answer accepts" in manager.exercise_message
+
+    assert manager.input_text == "aa", "left in the test field"
+    assert manager.input_expanded is True, "and the field is on screen"
+    assert app.execution_active is True, "with the run already started"
+    assert app.execution_string == "aa"
+    assert " ".join(exercise_content(app).feedback).startswith("your machine")
+
+
+def test_the_shortest_word_really_is_the_one_that_gets_run(app, tmp_path):
+    """The word the panel names and the word the tape strip is stepping
+    through are the same word, and it is the shortest one there is."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+    app._process_ui_events([events.BuildFromRegex("b*")])
+    pump(app, frames=6)
+
+    app._process_ui_events([events.CheckExercise()])
+    pump(app, frames=6)
+
+    reference = app.ui_manager.exercise.reference
+    shortest = fsa.counterexample(fsa.determinize(app.editor.automaton),
+                                  reference)
+    assert app.execution_string == shortest
+    assert app.ui_manager.input_text == shortest
+
+
+def test_the_empty_word_counterexample_still_starts_a_run(app, tmp_path):
+    """The commonest counterexample there is -- two machines that disagree
+    about their start states disagree before reading anything -- and the one
+    whose obvious spelling reads like a bug in the marker."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+
+    # Accepts exactly {"a"}, so it and the reference part company at "".
+    app._process_ui_events([events.BuildFromRegex("a")])
+    pump(app, frames=6)
+    app._process_ui_events([events.CheckExercise()])
+    pump(app, frames=6)
+
+    manager = app.ui_manager
+    assert manager.exercise_verdict == "wrong"
+    assert "the empty word" in manager.exercise_message
+    assert "the empty word" in " ".join(exercise_content(app).feedback)
+    assert manager.input_text == ""
+    assert app.execution_active is True, "the empty word is still a run"
+    assert app.execution_string == ""
+
+
+def test_a_correct_answer_says_so_unmistakably(app, tmp_path):
+    """A nondeterministic submission is a legal answer -- it is a machine over
+    the alphabet recognising a language, which is all that was asked for -- so
+    Thompson's own construction of the reference pattern must pass."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+
+    app._process_ui_events([events.BuildFromRegex("b*(ab*ab*)*")])
+    pump(app, frames=6)
+    assert not app.editor.is_deterministic, "an NFA, and still an answer"
+
+    app._process_ui_events([events.CheckExercise()])
+    pump(app, frames=6)
+
+    manager = app.ui_manager
+    assert manager.exercise_verdict == "correct"
+    assert manager.exercise_message == fsa.exercise.CORRECT_MESSAGE
+    assert exercise_panel_module.BADGES["correct"] == "CORRECT"
+    assert "Correct" in app.message_text
+    assert app.execution_active is False, "nothing to watch go wrong"
+
+
+def test_a_submission_with_no_start_state_is_told_what_to_do(app, tmp_path):
+    """Wrong, and with no word to prove it: there is no language for a word to
+    be compared against. The remedy is named instead."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+    app.editor.replace(fsa.Document().add_symbol("a").add_symbol("b"), None)
+
+    app._process_ui_events([events.CheckExercise()])
+    pump(app, frames=4)
+
+    assert app.ui_manager.exercise_verdict == "wrong"
+    assert app.ui_manager.exercise_message == fsa.exercise.NO_INITIAL_MESSAGE
+    assert app.execution_active is False, "no word, so no run"
+
+
+def test_a_verdict_does_not_outlive_the_machine_it_was_about(app, tmp_path):
+    """A student told that 'aa' betrays their answer, who then draws the arrow
+    that fixes it, must not still be looking at the same sentence."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+    app._process_ui_events([events.BuildFromRegex("b*")])
+    pump(app, frames=6)
+    app._process_ui_events([events.CheckExercise()])
+    pump(app, frames=4)
+    assert app.ui_manager.exercise_message
+
+    app._process_ui_events([events.AddStateAt((900.0, 120.0))])
+    pump(app, frames=4)
+
+    assert app.ui_manager.exercise_message == ""
+    assert app.ui_manager.exercise_verdict == ""
+    assert app.ui_manager.exercise is not None, "the task itself stays open"
+
+
+def test_dragging_a_state_does_not_discard_the_verdict(app, tmp_path):
+    """The other side of that rule: a move produces a new layout and the same
+    machine, and the verdict is about the machine."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+    app._process_ui_events([events.BuildFromRegex("b*")])
+    pump(app, frames=6)
+    app._process_ui_events([events.CheckExercise()])
+    pump(app, frames=4)
+    message = app.ui_manager.exercise_message
+
+    state = sorted(app.editor.automaton.states)[0]
+    start = screen_of(app, state)
+    click(app, start)
+    move(app, (start[0] + 40, start[1] + 40))
+    release(app, (start[0] + 40, start[1] + 40))
+    pump(app, frames=4)
+
+    assert app.ui_manager.exercise_message == message
+
+
+def test_an_exercise_opens_from_the_bundled_directory_by_bare_name(app,
+                                                                   tmp_path):
+    """The extension and examples/ are both assumed, because the alternative
+    is a blank field and a path nobody has been told."""
+    write_exercise(tmp_path / main_module.EXERCISE_DIRECTORY)
+    open_exercise(app, "even_as")
+
+    assert app.ui_manager.exercise is not None
+    assert app.exercise_path == "even_as", "what was typed comes back next time"
+
+
+def test_opening_an_exercise_gives_the_canvas_its_alphabet(app, tmp_path):
+    """A task over {0, 1} opened on a document over {a, b} cannot be answered
+    at all until those symbols exist -- there is nothing to label an arrow
+    with. Nothing is taken away: a symbol on the canvas may carry arrows."""
+    write_exercise(tmp_path, "binary.fsx", title="Ends with 01",
+                   prompt="Accept the words ending in 0 then 1.",
+                   alphabet=["0", "1"], reference={"regex": "(0|1)*01"},
+                   examples={"accept": ["01"], "reject": [""]})
+    open_exercise(app, "binary")
+
+    assert {"0", "1"} <= app.editor.automaton.alphabet
+    assert {"a", "b"} <= app.editor.automaton.alphabet, "and kept the old ones"
+    assert "0" in app.ui_manager.available_symbols, "the palette followed"
+    assert "added" in app.message_text
+
+
+def test_a_file_that_is_not_an_exercise_is_refused_by_name(app, tmp_path):
+    """The failure reaches the screen, and the panel stays shut rather than
+    opening on a task nobody could read."""
+    (tmp_path / "notes.fsx").write_text("{not json", encoding="utf-8")
+    open_exercise(app, "notes")
+
+    assert app.ui_manager.exercise is None
+    assert "Could not open the exercise" in app.message_text
+    assert exercise_panel_rect(app) is None
+
+
+def test_checking_with_no_exercise_open_says_so_rather_than_crashing(app):
+    app._process_ui_events([events.CheckExercise()])
+    assert "No exercise is open" in app.message_text
+
+
+def test_closing_an_exercise_leaves_the_machine_alone(app, tmp_path):
+    write_exercise(tmp_path)
+    open_exercise(app)
+    before = app.editor.document
+
+    click(app, empty_canvas_point(app), button=3)
+    choose_menu_item(app, "Close the exercise")
+    pump(app, frames=24)
+
+    assert app.ui_manager.exercise is None
+    assert exercise_panel_rect(app) is None
+    assert app.editor.document == before
+
+
+def test_the_check_items_appear_only_while_an_exercise_is_open(app, tmp_path):
+    """A menu that offers to grade an answer against no question is offering
+    an action whose only outcome is a complaint."""
+    app._show_general_context_menu((300, 300))
+    labels = [item.label for item in app.ui_manager.context_menu.items]
+    assert "Open an exercise..." in labels
+    assert "Check my answer" not in labels
+    app.ui_manager.hide_context_menu()
+
+    write_exercise(tmp_path)
+    open_exercise(app)
+    app._show_general_context_menu((300, 300))
+    labels = [item.label for item in app.ui_manager.context_menu.items]
+    assert "Check my answer" in labels
+    assert "Close the exercise" in labels
+
+
+def test_the_exercise_panel_asks_for_room_for_every_line_it_will_draw(app,
+                                                                      tmp_path):
+    """The height the column is told and the loop that draws the lines test
+    against the same button from opposite ends. Two pixels of disagreement
+    silently cost the panel its last example row: nothing crashes when a panel
+    is laid out one size and painted another."""
+    write_exercise(tmp_path)
+    open_exercise(app)
+    app._process_ui_events([events.BuildFromRegex("b*")])
+    pump(app, frames=6)
+    app._process_ui_events([events.CheckExercise()])
+    pump(app, frames=24)
+
+    manager = app.ui_manager
+    content = exercise_content(app)
+    assert content.feedback, "a verdict is showing"
+    assert len(content.examples) == 2, "and both example rows"
+
+    height = exercise_panel_module.body_height(
+        manager.chrome, exercise=manager.exercise,
+        message=manager.exercise_message, width=layout_spec.PANEL_WIDTH)
+    body = pygame.Rect(0, 0, layout_spec.PANEL_WIDTH, height)
+    assert (exercise_panel_module.content_height(content)
+            <= exercise_panel_module.ceiling(body))
+
+
+def test_replacing_the_machine_clears_the_verdict_about_the_old_one(app):
+    """The run is stopped when a construction replaces the machine, but its
+    sentence used to stay: 'aab was rejected' under a machine that is no longer
+    on the canvas. Worst in the exercise loop, whose whole shape is be told a
+    word, watch it fail, fix the machine, look again."""
+    app._test_string("aab")
+    assert app.ui_manager.test_result
+
+    app._process_ui_events([events.BuildFromRegex("ab")])
+    pump(app, frames=4)
+
+    assert app.ui_manager.test_result == ""
+    assert app.ui_manager.test_verdict == ""

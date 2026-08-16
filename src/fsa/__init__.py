@@ -22,6 +22,7 @@ names the pair, for the few functions that read only what both expose.
 
 from fsa import (
     equivalence,
+    exercise,
     export,
     geometry,
     language,
@@ -53,6 +54,12 @@ from fsa.errors import (
     NondeterministicError,
     UnknownStateError,
 )
+
+# `exercise.check`, `exercise.loads` and `exercise.dumps` are deliberately NOT
+# re-exported: `fsa.loads` and `fsa.dumps` already mean documents, and a second
+# pair under those names would make which format was meant a question about
+# import order. The three values below have names of their own.
+from fsa.exercise import Exercise, ExerciseFormatError, Result
 from fsa.layout import AnyAutomaton, Layout, Point
 from fsa.minimize import MarkingTable, marking_table, minimize
 
@@ -139,6 +146,11 @@ __all__ = [
     "load_or_error",
     "save_or_error",
     "DocumentFormatError",
+    # exercises
+    "exercise",
+    "Exercise",
+    "Result",
+    "ExerciseFormatError",
     # errors
     "AutomatonError",
     "IllegalSymbolError",

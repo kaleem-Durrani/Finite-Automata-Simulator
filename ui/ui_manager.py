@@ -35,6 +35,7 @@ from ui.layout_spec import (
 from ui.panels import (
     column,
     diagnostics,
+    exercise_panel,
     help_panel,
     palette,
     run_panel,
@@ -105,7 +106,8 @@ class UIManager:
         self.adding_symbol = False
         self.new_symbol_input = ""
 
-        # Filename prompt state ('save' | 'load' | 'rename' | 'regex' | None)
+        # Filename prompt state
+        # ('save' | 'load' | 'exercise' | 'rename' | 'regex' | None)
         self.file_prompt_mode: Optional[str] = None
         self.file_prompt_text = ""
         self.rename_target = ""
@@ -183,6 +185,24 @@ class UIManager:
         # needed thing on screen and it was the largest, so it starts folded
         # and opens on a click or as soon as a run reports a verdict.
         self.input_expanded = False
+
+        # The open exercise, if any, and the last verdict on it. Held here the
+        # way `marking_table` is: a value the engine built, which the interface
+        # draws and never computes -- `fsa.exercise.check` is the application's
+        # call to make, and its `Result` arrives back through
+        # `set_exercise_result`.
+        self.exercise: Optional[fsa.Exercise] = None
+        self.exercise_message = ""
+        # "correct", "wrong", or empty before the first check. A string rather
+        # than a bool because "not checked yet" is a third answer, and a bool
+        # would have to guess which of the two it looked like.
+        self.exercise_verdict = ""
+        # The automaton value that verdict was reached about. A machine that
+        # has since been edited is a different value -- it is immutable, so an
+        # identity check is the whole invalidation rule -- and a sentence about
+        # a machine nobody can see any more is worse than no sentence at all.
+        self.exercise_checked: Optional["fsa.AnyAutomaton"] = None
+        self._exercise_check: Optional[pygame.Rect] = None
 
         # The current tool: "pointer", "pan" or "transition". One name rather
         # than a flag per tool, because the tools are exclusive and two
@@ -359,6 +379,58 @@ class UIManager:
         self.marking_selected = None
         self._marking_cells = {}
         self._marking_close = None
+
+    # ------------------------------------------------------------------
+    # The open exercise
+    # ------------------------------------------------------------------
+
+    def show_exercise(self, exercise: "fsa.Exercise") -> None:
+        """Put a task on screen, with no verdict on it yet.
+
+        The panel is unfolded on the way in. Somebody who folded it away while
+        working on the last exercise did not thereby ask never to see the next
+        one, and a task that opens invisibly is a menu item that appears to do
+        nothing.
+        """
+        self.exercise = exercise
+        self.exercise_message = ""
+        self.exercise_verdict = ""
+        self.exercise_checked = None
+        self.column_state.collapsed["exercise"] = False
+
+    def hide_exercise(self) -> None:
+        """Put the exercise away. Nothing about the machine changes."""
+        self.exercise = None
+        self.exercise_message = ""
+        self.exercise_verdict = ""
+        self.exercise_checked = None
+        self._exercise_check = None
+
+    def set_exercise_result(self, message: str, correct: bool,
+                            automaton: "fsa.AnyAutomaton") -> None:
+        """Record a verdict, and the machine it was reached about.
+
+        ``automaton`` is kept so the panel can drop the sentence the moment the
+        submission changes underneath it. See :attr:`exercise_checked`.
+        """
+        self.exercise_message = message
+        self.exercise_verdict = "correct" if correct else "wrong"
+        self.exercise_checked = automaton
+
+    def _forget_stale_result(self, automaton: "fsa.AnyAutomaton") -> None:
+        """Drop a verdict that was about some earlier version of the machine.
+
+        Called once a frame from :meth:`draw`, which is the only place that is
+        handed the machine currently on the canvas. A student who is told that
+        ``'bb'`` betrays their answer, draws the arrow that fixes it, and is
+        still looking at the same NOT YET has been told something false by a
+        panel that simply forgot to stop talking.
+        """
+        if self.exercise_checked is None or self.exercise_checked is automaton:
+            return
+        self.exercise_message = ""
+        self.exercise_verdict = ""
+        self.exercise_checked = None
 
     def draw_legend(self, automaton: "fsa.AnyAutomaton") -> None:
         """Explain the state styles, showing only the kinds actually present."""
@@ -543,6 +615,8 @@ class UIManager:
                              self._panel_header_handler(key)))
         if self._fix_button is not None:
             hits.append((self._fix_button, self._on_fix_button))
+        if self._exercise_check is not None:
+            hits.append((self._exercise_check, self._on_check_exercise))
         for row_rect, payload in self._diagnostic_rows:
             hits.append((row_rect, self._diagnostic_handler(payload)))
         for symbol, rect in self.symbol_buttons.items():
@@ -628,6 +702,9 @@ class UIManager:
 
     def _on_fix_button(self, _pos) -> Events:
         return [events.CompleteAutomaton()]
+
+    def _on_check_exercise(self, _pos) -> Events:
+        return [events.CheckExercise()]
 
     def _diagnostic_handler(self, states: Tuple[str, ...]):
         def handler(_pos) -> Events:
@@ -910,6 +987,11 @@ class UIManager:
             return [events.BuildFromRegex(name)]
         if not name:
             return []
+        if mode == 'exercise':
+            # The same one-line prompt as Load, and deliberately so: opening a
+            # task is opening a file, and a second modal would be a second
+            # thing to keep in step with the first.
+            return [events.LoadExercise(name)]
         return [events.SaveToPath(name) if mode == 'save'
                 else events.LoadFromPath(name)]
 
@@ -1041,6 +1123,7 @@ class UIManager:
         """
         self._animation_active = animation_active
         self.execution_panel_visible = execution_active
+        self._forget_stale_result(automaton)
 
         legend_rows = 1
         legend_rows += 1 if automaton.accept else 0
@@ -1055,9 +1138,13 @@ class UIManager:
             legend_rows=legend_rows,
             diagnostics_height=diagnostics.body_height(
                 self.chrome, self.diagnostics, layout_spec.PANEL_WIDTH),
+            exercise_height=exercise_panel.body_height(
+                self.chrome, exercise=self.exercise,
+                message=self.exercise_message, width=layout_spec.PANEL_WIDTH),
             warn_no_accepting=self.warn_no_accepting)
         self._diagnostic_rows = []
         self._fix_button = None
+        self._exercise_check = None
 
         chrome = self.chrome
         mouse_pos = pygame.mouse.get_pos()
@@ -1098,6 +1185,14 @@ class UIManager:
                     mouse_pos=mouse_pos)
                 self._diagnostic_rows = list(hits.rows)
                 self._fix_button = hits.fix_button
+            elif key == "exercise":
+                self._exercise_check = exercise_panel.draw(
+                    chrome, rect=rect, exercise=self.exercise,
+                    message=self.exercise_message,
+                    verdict=self.exercise_verdict,
+                    collapsed=bool(self.column_state.collapsed.get(key)),
+                    layout=self.layout, pressed_rect=self._pressed_rect,
+                    mouse_pos=mouse_pos)
 
     def draw_overlays(self) -> None:
         """Everything that must sit above every panel: help, menus, modals.
