@@ -2581,3 +2581,39 @@ def test_editing_a_branch_out_from_under_a_live_run_does_not_crash(app):
     assert app.running
     assert ("q0", "q1") not in app._edge_paths(app.editor.positions())
     assert len(app._build_tokens(app._edge_paths(app.editor.positions()))) == 1
+
+
+def test_a_short_label_stays_inside_its_state(app):
+    """The common case is unchanged: q0 belongs in the circle, where it cannot
+    be read as belonging to whatever it overlaps."""
+    font = app.renderer.fonts.scaled("state", 1.0)
+    assert font.size("q0")[0] <= default_state_radius() * 1.7
+
+
+def test_two_subset_states_are_told_apart_on_the_canvas(app):
+    """The defect this fixes: every subset name starts '{q0,' and they were
+    elided to fit the disc, so '{q0,q1}' and '{q0,q2}' both drew as '{q0,q...'.
+    Seeing which states a subset came from is the whole lesson of the
+    construction, and the drawing had stopped showing it.
+    """
+    def render(label: str) -> bytes:
+        app.editor.rename("q1", label)
+        pump(app, frames=3)
+        return pygame.image.tostring(app.screen, "RGB")
+
+    first = render("{q0,q1}")
+    second = render("{q0,q2}")
+    assert first != second, "two different subset names drew identically"
+
+
+def test_a_long_label_is_not_elided_away(app):
+    """It moves below the state rather than being cut, so the full name is
+    still on screen."""
+    long_name = "{q0,q1,q2,q3}"
+    budget = default_state_radius() * 1.7
+    font = app.renderer.fonts.scaled("state", 1.0)
+    assert font.size(long_name)[0] > budget, "this name genuinely does not fit"
+
+    # The wider budget the below-the-node path uses keeps it whole.
+    assert renderer_module._elide(
+        font, long_name, default_state_radius() * 6.0) == long_name

@@ -235,13 +235,32 @@ class Renderer:
         else:
             colour = palette.state_text
         font = self.fonts.scaled("state", zoom)
-        # Kept inside the disc: the label belongs to this state, so it must not
-        # be readable as belonging to whatever it would otherwise overlap.
-        surface = font.render(
-            _elide(font, node.label, node.radius * zoom * 1.7), True, colour)
         centre = self.camera.world_to_screen(node.position)
-        self.screen.blit(surface, surface.get_rect(
-            center=(int(centre[0]), int(centre[1]))))
+        radius = node.radius * zoom
+
+        # A name that fits goes inside the disc, where it plainly belongs to
+        # this state and cannot be read as belonging to whatever it overlaps.
+        inside = radius * 1.7
+        if font.size(node.label)[0] <= inside:
+            surface = font.render(node.label, True, colour)
+            self.screen.blit(surface, surface.get_rect(
+                center=(int(centre[0]), int(centre[1]))))
+            return
+
+        # A name that does not fit goes *below* the disc, in full, on the same
+        # kind of plate the edge labels use. Eliding it instead was worse than
+        # it looked: the subset construction names every state for the set it
+        # came from, and seeing that is the entire lesson of the algorithm --
+        # but "{q0,q1}" and "{q0,q2}" both elide to "{q0,q...", so the drawing
+        # stopped distinguishing the states it had just built.
+        surface = font.render(
+            _elide(font, node.label, max(inside, radius * 6.0)), True,
+            palette.label_text)
+        rect = surface.get_rect(
+            center=(int(centre[0]), int(centre[1] + radius + surface.get_height())))
+        primitives.panel(self.screen, rect.inflate(9, 5), palette.label_plate,
+                         radius=self.theme.radius.sm)
+        self.screen.blit(surface, rect)
 
     # ------------------------------------------------------------------
     # Edges
