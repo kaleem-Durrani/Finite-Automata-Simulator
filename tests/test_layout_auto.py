@@ -344,3 +344,48 @@ def test_an_unknown_algorithm_is_refused():
     with pytest.raises(ValueError) as raised:
         Layout.auto(chain(), algorithm="force_directed")
     assert "force_directed" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# Layout is about the graph, not about determinism
+# ---------------------------------------------------------------------------
+
+
+def test_auto_lays_out_a_nondeterministic_machine():
+    """Regression. `_bfs_layers` walked delta with `automaton.target(...)`,
+    which only a DFA has, so an NFA could not be drawn at all -- it raised
+    AttributeError the first time anything tried. Layout only ever needed to
+    know which states are one edge apart, and both types answer that.
+    """
+    from fsa.nfa import NFA
+
+    automaton = NFA(states=frozenset({"q0", "q1", "q2", "q3"}),
+                    alphabet=frozenset("ab")).with_initial("q0")
+    for source, symbol, target in [
+        ("q0", "a", "q0"), ("q0", "b", "q0"), ("q0", "a", "q1"),
+        ("q1", "b", "q2"), ("q2", "b", "q3"),
+    ]:
+        automaton = automaton.with_transition(source, symbol, target)
+    assert not automaton.is_deterministic()
+
+    layout = Layout.auto(automaton)
+    assert set(layout.positions) == set(automaton.states)
+    placed = sorted(layout.positions.items())
+    for index, (_a, first) in enumerate(placed):
+        for _b, second in placed[index + 1:]:
+            assert math.dist(first, second) >= 2 * 30.0
+
+
+def test_auto_follows_epsilon_edges_when_layering():
+    """An epsilon move is an edge: the states it joins are adjacent in the
+    drawing, even though no symbol is read crossing it."""
+    from fsa.nfa import EPSILON, NFA
+
+    automaton = (NFA(states=frozenset({"q0", "q1"}), alphabet=frozenset("a"))
+                 .with_initial("q0")
+                 .with_transition("q0", EPSILON, "q1"))
+    layout = Layout.auto(automaton)
+
+    assert set(layout.positions) == {"q0", "q1"}
+    # Reached in one step, so q1 sits in the next column, not the orphan block.
+    assert layout.positions["q1"][0] > layout.positions["q0"][0]

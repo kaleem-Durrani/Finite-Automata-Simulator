@@ -28,3 +28,17 @@ class IncompleteAutomatonError(AutomatonError):
     machine that simply halts on some inputs is not the complement of its
     language. Completing it first is a real step, not a formality.
     """
+
+
+class NondeterministicError(AutomatonError):
+    """An operation requires a deterministic machine and was given a choice.
+
+    Raised by :func:`fsa.nfa.to_dfa`. "Deterministic" here is a statement about
+    delta alone: no epsilon moves, and no state with two targets on one symbol.
+    A *partial* delta is still deterministic -- a state with no move at all has
+    nothing to choose between -- so this is a different complaint from
+    :class:`IncompleteAutomatonError`, and it has a different remedy. The fix
+    for incompleteness is one trap state; the fix for this is the subset
+    construction, which builds a machine with different states, so no operation
+    performs it silently.
+    """

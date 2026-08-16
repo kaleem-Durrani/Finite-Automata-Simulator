@@ -154,6 +154,31 @@ def _write_document(document: "fsa.Document", path: Optional[str],
     return OK
 
 
+def cmd_determinize(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Turn a nondeterministic machine into an equivalent deterministic one."""
+    loaded, error = serialize.load_nfa_or_error(args.file)
+    if loaded is None:
+        print(f"{PROGRAM}: {args.file}: {error}", file=err)
+        return USAGE
+
+    automaton, _layout, next_id = loaded
+    if automaton.initial is None:
+        print(f"{PROGRAM}: no initial state, so there is no language to "
+              f"preserve", file=err)
+        return USAGE
+
+    result = fsa.determinize(automaton)
+    print(f"{len(automaton.states)} states -> {len(result.states)}", file=out)
+    if automaton.is_deterministic():
+        print("(it was already deterministic; the subset construction still "
+              "completes delta)", file=out)
+
+    # Subset states are new, so the drawing is new: nothing here was placed by
+    # anyone.
+    rebuilt = fsa.Document(result, fsa.Layout.auto(result), next_id)
+    return _write_document(rebuilt, args.output, out, err)
+
+
 def cmd_minimize(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Merge the states no word can tell apart."""
     document = _load(args.file, err)
@@ -367,6 +392,13 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--rejected", action="store_true",
                         help="also list rejected words, labelled")
     sample.set_defaults(handler=cmd_sample)
+
+    determinize = subs.add_parser(
+        "determinize", help="subset construction: NFA to an equivalent DFA")
+    determinize.add_argument("file")
+    determinize.add_argument("-o", "--output",
+                             help="write here instead of printing the document")
+    determinize.set_defaults(handler=cmd_determinize)
 
     minimize = subs.add_parser("minimize", help="merge indistinguishable states")
     minimize.add_argument("file")

@@ -340,20 +340,21 @@ def _bfs_layers(automaton: DFA) -> Tuple[Tuple[StateId, ...], ...]:
     queue = deque([initial])
     while queue:
         state = queue.popleft()
+        # Read through grouped_transitions rather than delta directly. Both
+        # DFA and NFA expose it, and it answers the only question layout has --
+        # which states are one edge apart -- without caring how many targets a
+        # symbol has or whether an edge is an epsilon move. Asking for
+        # `target(state, symbol)` tied placement to determinism, so an NFA
+        # could not be drawn at all.
+        #
         # Sorted, so the traversal does not depend on set order. The distances
-        # themselves would survive that, but a future change that used visit
-        # order for anything would silently start drawing a different picture
-        # on every run.
-        for symbol in sorted(automaton.alphabet):
-            target = automaton.target(state, symbol)
-            if target is None:
-                # delta is partial: no arrow on this symbol. That is a normal
-                # automaton, not an error, and the state simply has one fewer
-                # successor.
+        # would survive that, but a future change that used visit order for
+        # anything would silently draw a different picture on every run.
+        for source, target in sorted(automaton.grouped_transitions()):
+            if source != state or target in depth:
                 continue
-            if target not in depth:
-                depth[target] = depth[state] + 1
-                queue.append(target)
+            depth[target] = depth[state] + 1
+            queue.append(target)
 
     layers: List[List[StateId]] = [[] for _ in range(max(depth.values()) + 1)]
     for state, distance in sorted(depth.items()):

@@ -16,6 +16,7 @@ from typing import Optional, Sequence
 from hypothesis import strategies as st
 
 import fsa
+from fsa.nfa import EPSILON, NFA
 
 #: Small by default. Shrinking works best when the search space is not vast,
 #: and every property here is about structure rather than scale -- the timing
@@ -64,6 +65,45 @@ def dfas(draw: st.DrawFn, *, min_states: int = 1, max_states: int = 6,
             if complete or draw(st.booleans()):
                 target = draw(st.sampled_from(ids))
                 automaton = automaton.with_transition(state, symbol, target)
+    return automaton
+
+
+@st.composite
+def nfas(draw: st.DrawFn, *, min_states: int = 1, max_states: int = 4,
+         alphabet: Optional[Sequence[str]] = None, epsilons: bool = True,
+         with_initial: bool = True) -> NFA:
+    """A nondeterministic automaton: partial, branching and epsilon-ridden.
+
+    Deliberately not :func:`dfas` with a wider type. Several targets on one
+    symbol is the ordinary case here rather than the exception, and about a
+    third of the states get an epsilon move -- whose target is drawn from every
+    state including itself, so epsilon *cycles* arise on their own. That is the
+    case naive closures spin on forever, and a generator that could not produce
+    it would make every property it feeds vacuous.
+
+    Smaller than :func:`dfas` by default, because the subset construction is
+    exponential in the worst case and four states is already sixteen subsets.
+    """
+    symbols = (frozenset(alphabet) if alphabet is not None
+               else draw(alphabets()))
+    count = draw(st.integers(min_value=min_states, max_value=max_states))
+    ids = state_ids(count)
+
+    automaton = NFA(states=frozenset(ids), alphabet=symbols)
+    if with_initial:
+        automaton = automaton.with_initial(ids[0])
+
+    for state in ids:
+        if draw(st.booleans()):
+            automaton = automaton.with_accept(state)
+        for symbol in sorted(symbols):
+            # An empty list is a state with no move on that symbol: partial
+            # delta, which is the common case in this engine and not an edge.
+            for target in draw(st.lists(st.sampled_from(ids), max_size=2)):
+                automaton = automaton.with_transition(state, symbol, target)
+        if epsilons and draw(st.integers(min_value=0, max_value=2)) == 0:
+            automaton = automaton.with_transition(
+                state, EPSILON, draw(st.sampled_from(ids)))
     return automaton
 
 

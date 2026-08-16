@@ -51,7 +51,8 @@ it without hesitation.
 | Phase | Hours | Buys |
 |---|---:|---|
 | 11 · Verification infrastructure | 6 | Every later phase is checked against an independent implementation |
-| 12 · NFA, ε-moves, subset construction | 14 | **The biggest capability gap in the tool** |
+| 12a · NFA in the engine | 8 | **The biggest capability gap in the tool** |
+| 12b · NFA in the editor | 8 | Drawing and running a nondeterministic machine |
 | 13 · Regular expressions, both directions | 12 | Closes Kleene's theorem: the spine of the course |
 | 14 · Exercises and self-grading | 8 | **Highest value per hour.** Turns an editor into a course instrument |
 | 15 · Layout and editing affordances | 9 | The tool stops fighting the person using it |
@@ -93,7 +94,7 @@ actually reproduces it.
 
 ---
 
-### Phase 12 — NFA, ε-moves, and the subset construction · 14h
+### Phase 12a — NFA in the engine · 8h
 
 The engine models δ as `{(state, symbol): state}` — one target, always. Every
 automata course spends as much time on nondeterminism as on determinism, so
@@ -110,24 +111,52 @@ this is the single change that most enlarges what the tool can teach.
   DFA state came from. Deterministic naming, sorted, so two runs agree.
 - `DFA.as_nfa()` for the trivial direction, so the boolean operations and
   equivalence can accept either.
-- **Serialization**: a format version bump, with `serialize.load` accepting both
-  and a test that a v2 file still loads.
-- **GUI**: the canvas must accept two edges on one symbol. Today
-  `add_transition` overwrites. A document knows whether it is deterministic; the
-  diagnostics panel reports nondeterminism as a *fact*, not a defect (the same
-  lesson as partial δ — see the complete/trim cycle).
+- **Serialization**: version 3 for a document holding an NFA. Version 2 keeps
+  emitting exactly the bytes it does today, because example files, an existing
+  round-trip test and the generated README table all depend on them.
 - **CLI**: `fsa determinize machine.json`.
 
 **Exit criteria**
 1. Property: `accepts(nfa, w) == accepts(determinize(nfa), w)` over
    hypothesis-generated NFAs and words.
 2. Property: `determinize` output is complete and deterministic by construction.
-3. Differential: our `determinize` agrees with `automata-lib` on ≥1000 machines
-   (compare languages, not state names).
-4. ε-closure is tested against a machine with an ε-cycle, which is the case that
-   breaks naive implementations.
-5. Event replay: an NFA with two `a`-edges from one state can be drawn on the
-   canvas, saved, reloaded, and determinized from the menu.
+3. Differential: our `determinize` agrees with `automata-lib`, comparing
+   languages rather than state names.
+4. ε-closure is tested against a machine with an ε-*cycle*, which is the case
+   that breaks naive implementations.
+5. Every existing file still loads, and a v2 document still serialises byte-for-
+   byte as it did before.
+
+---
+
+### Phase 12b — NFA in the editor · 8h
+
+Split from 12a deliberately. `Document.automaton` is typed `DFA`, and widening
+it reaches the editor, `analysis`, `ops`, `product`, `minimize`, all three
+exporters and most of the GUI — every one of which assumes one target per
+`(state, symbol)`. That is the expensive half, and doing it in the same change
+as the engine work would make both hard to review.
+
+- **`Document` holds either.** Decide the shape: a union, or store an `NFA`
+  always and treat a `DFA` as the deterministic case. The second is tempting and
+  probably wrong — most of the algorithms layer is genuinely DFA-only, and
+  making them all re-check determinism per call trades a type error for a
+  runtime one.
+- **The canvas accepts two edges on one symbol.** `editor.add_transition`
+  overwrites today.
+- **ε-edges** are drawable and drawn distinctly.
+- **The diagnostics panel reports nondeterminism as a *fact*, not a defect** —
+  the same lesson as partial δ, and the same trap as the complete/trim cycle: a
+  legal design choice must not be labelled a fault with a Fix button.
+- **The run animation shows a set of states**, not a token on one.
+- **Menu**: Determinize, alongside Minimise and Trim.
+
+**Exit criteria**
+1. Event replay: an NFA with two `a`-edges from one state is drawn on the
+   canvas, saved, reloaded and determinized from the menu.
+2. Running a word on an NFA lights every state the machine is in, not one.
+3. Every DFA-only algorithm refuses a nondeterministic document with an error
+   naming `determinize`, and a test proves each one does.
 
 ---
 

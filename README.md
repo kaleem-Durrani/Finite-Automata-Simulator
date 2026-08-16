@@ -26,6 +26,10 @@ then step through how a string is processed, one symbol at a time.
   automatically, and labels on plates so they stay legible where edges cross
 - **Configurable symbol palette** — `a`, `b`, `0`, `1` by default; more can be added at runtime
 - **Context menus** — right-click a state to change its type or delete it
+- **Nondeterminism** — NFAs with ε-moves in the engine, and the subset
+  construction that turns one into an equivalent DFA. The generated states are
+  named for the subset they came from (`{q0,q2}`), because seeing *where* a DFA
+  state came from is the whole lesson
 - **Algorithms** — minimise (Moore, with the marking table available for display),
   trim, complete, union / intersection / difference / complement, and an
   equivalence check that returns the *shortest distinguishing word* when two
@@ -170,6 +174,7 @@ fsa run      machine.json 0110    # ...and show every step
 fsa check    machine.json         # structural problems; exit 1 if any
 fsa show     machine.json         # the transition table
 fsa sample   machine.json -n 10   # words it accepts, shortest first
+fsa determinize nfa.json          # subset construction: NFA -> DFA
 fsa minimize machine.json         # merge states no word can tell apart
 fsa complete machine.json         # route undefined pairs to a trap
 fsa equiv    a.json b.json        # same language? exit 1 + a counterexample

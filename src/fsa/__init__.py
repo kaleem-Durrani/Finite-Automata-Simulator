@@ -14,7 +14,7 @@ imports pygame, and CI enforces that. The GUI is one front end among several.
     "'aa' was rejected: no transition from q1 on 'a' at position 1 -- this automaton is incomplete"
 """
 
-from fsa import equivalence, export, geometry, language, ops, product
+from fsa import equivalence, export, geometry, language, nfa, ops, product, subset
 from fsa.analysis import (
     Defect,
     co_reachable,
@@ -34,10 +34,17 @@ from fsa.errors import (
     DuplicateStateError,
     IllegalSymbolError,
     IncompleteAutomatonError,
+    NondeterministicError,
     UnknownStateError,
 )
 from fsa.layout import Layout, Point
 from fsa.minimize import MarkingTable, marking_table, minimize
+
+# `nfa.accepts` and `nfa.run` are deliberately NOT re-exported: the names
+# already belong to the DFA simulator, and a nondeterministic run returns a
+# different value. Reach them through the module, so which one you meant is
+# written at the call site.
+from fsa.nfa import EPSILON, NFA
 from fsa.ops import complete, trim
 from fsa.product import (
     complement,
@@ -54,6 +61,7 @@ from fsa.serialize import (
     save_or_error,
 )
 from fsa.simulate import Run, Step, Verdict, accepts, run
+from fsa.subset import determinize
 from fsa.symbols import StateId, Symbol, is_legal_symbol, normalize_alphabet
 
 __all__ = [
@@ -68,6 +76,12 @@ __all__ = [
     "ops",
     "product",
     "equivalence",
+    "nfa",
+    "subset",
+    "NFA",
+    "EPSILON",
+    "determinize",
+    "NondeterministicError",
     "StateId",
     "Symbol",
     "is_legal_symbol",
