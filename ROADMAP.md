@@ -66,7 +66,7 @@ before 13 because regular expressions are built out of NFAs.
 
 ---
 
-### Phase 11 — Verification infrastructure · 6h
+### Phase 11 — Verification infrastructure · 6h ✅
 
 Sharpen the saw before touching the engine. The current property tests
 hand-roll random automata with `random.Random(seed)`; they work, but a failure
@@ -94,7 +94,7 @@ actually reproduces it.
 
 ---
 
-### Phase 12a — NFA in the engine · 8h
+### Phase 12a — NFA in the engine · 8h ✅
 
 The engine models δ as `{(state, symbol): state}` — one target, always. Every
 automata course spends as much time on nondeterminism as on determinism, so
@@ -129,7 +129,7 @@ this is the single change that most enlarges what the tool can teach.
 
 ---
 
-### Phase 12b — NFA in the editor · 8h
+### Phase 12b — NFA in the editor · 8h ✅
 
 Split from 12a deliberately. `Document.automaton` is typed `DFA`, and widening
 it reaches the editor, `analysis`, `ops`, `product`, `minimize`, all three
@@ -160,7 +160,7 @@ as the engine work would make both hard to review.
 
 ---
 
-### Phase 13 — Regular expressions, both directions · 12h
+### Phase 13 — Regular expressions, both directions · 12h ✅
 
 Closes Kleene's theorem. With Phase 12 in place this is mostly construction.
 

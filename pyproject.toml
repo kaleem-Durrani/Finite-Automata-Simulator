@@ -23,16 +23,19 @@ dependencies = []
 [project.optional-dependencies]
 gui = ["pygame>=2.6,<3"]
 # hypothesis generates the engine's test data and shrinks failures to the
-# smallest machine that reproduces them. automata-lib is a differential
-# oracle: we implement the algorithms and check our answers against an
-# independent implementation. Neither may be imported by src/fsa -- CI
-# fails the build if one is.
+# smallest machine that reproduces them. automata-lib and greenery are
+# differential oracles: we implement the algorithms and check our answers
+# against an independent implementation -- automata-lib for the machines,
+# greenery for the regular expressions, which it converts in both directions
+# just as fsa.regex does. None of them may be imported by src/fsa -- CI fails
+# the build if one is.
 dev = [
     "ruff>=0.16",
     "mypy>=1.11",
     "pytest>=8.0",
     "hypothesis>=6.100",
     "automata-lib>=9",
+    "greenery>=4",
     "pytest-benchmark>=5",
 ]
 
@@ -95,6 +98,12 @@ strict_equality = true
 
 [[tool.mypy.overrides]]
 module = "pygame.*"
+ignore_missing_imports = true
+
+# The regex oracle ships no py.typed marker. It is used by one test module and
+# never by the engine, so the missing annotations cost nothing worth chasing.
+[[tool.mypy.overrides]]
+module = "greenery.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

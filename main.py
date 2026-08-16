@@ -70,6 +70,24 @@ def _shown_symbol(symbol: Optional[str]) -> str:
 #: Symbols a brand-new document starts with, so the palette is never empty.
 STARTING_ALPHABET = ("a", "b")
 
+#: How much of a derived expression the status row will carry. The panel cuts
+#: whatever it is given down to the column width one character and one font
+#: render at a time, so handing over the whole answer would cost a few hundred
+#: thousand renders per frame on a machine whose expression runs to megabytes.
+PATTERN_DISPLAY_LIMIT = 64
+
+#: How much state elimination this program is willing to do between two frames.
+#: Ripping a state writes one label for every (predecessor, successor) pair, so
+#: the product of its in- and out-degree is what that one rip costs -- the same
+#: number state elimination minimises when it chooses what to rip next -- and
+#: summing it over the machine estimates the whole job. Measured
+#: here on random complete DFAs: an estimate of 150 costs about 6ms, 230 about
+#: 50ms, and 300 nearly half a second while producing 1.6MB of expression that
+#: nobody could read anyway. Thompson's own machines sit far below the line (a
+#: 44-state one estimates 76), so the guard never fires on what this feature
+#: produces -- only on the dense machines it could not usefully answer for.
+ELIMINATION_BUDGET = 200
+
 #: What each tool does, said once when it is chosen. A modal tool that changes
 #: what a click means owes the user an explanation of the change.
 TOOL_HINTS = {
@@ -162,6 +180,26 @@ def _nfa_trace(automaton: fsa.NFA, result: fsa.nfa.NfaRun) -> List[RunPosition]:
             for source in step.source
             for target in automaton.targets(source, step.symbol)))))
     return trace
+
+
+def _elimination_cost(automaton: fsa.NFA) -> int:
+    """An estimate of what deriving an expression from ``automaton`` costs.
+
+    Counted over the drawn edges rather than the transition table, because a
+    GNFA holds one label per (source, target) pair however many symbols share
+    it. Self-loops are excluded for the reason
+    :func:`fsa.regex._next_to_rip` excludes them: a loop is a way round a
+    state, not a way through it, and it becomes a star rather than a new edge.
+    """
+    incoming: Dict[str, int] = {}
+    outgoing: Dict[str, int] = {}
+    for source, target in automaton.grouped_transitions():
+        if source == target:
+            continue
+        incoming[target] = incoming.get(target, 0) + 1
+        outgoing[source] = outgoing.get(source, 0) + 1
+    return sum(incoming.get(state, 0) * outgoing.get(state, 0)
+               for state in automaton.states)
 
 
 def _maximize_window() -> None:
@@ -275,6 +313,9 @@ class AutomatonSimulator:
         self._right_dragged = False
 
         self._loop_angle_cache: Dict[str, float] = {}
+        # (automaton, expression) for the last derivation, keyed on the value
+        # itself. See _denoted_pattern.
+        self._cached_pattern: Optional[Tuple[Any, str]] = None
         self._event_handlers = self._build_event_handlers()
 
         self.ui_manager.sync_symbols_with(self.editor.automaton)
@@ -612,6 +653,8 @@ class AutomatonSimulator:
             events.MinimizeAutomaton: lambda _e: self._minimize_automaton(),
             events.ShowMarkingTable: lambda _e: self._show_marking_table(),
             events.TrimAutomaton: lambda _e: self._trim_automaton(),
+            events.RegexPrompt: lambda _e: self._show_regex_prompt(),
+            events.BuildFromRegex: lambda e: self._build_from_regex(e.pattern),
             events.FocusStates: lambda e: self._focus_states(list(e.states)),
             events.ShowMessage: lambda e: self._show_message(e.text),
             events.SymbolSelected: self._on_symbol_selected,
@@ -957,6 +1000,83 @@ class AutomatonSimulator:
         else:
             self._show_message(count)
 
+    def _show_regex_prompt(self) -> None:
+        """Ask for a regular expression.
+
+        The field starts empty rather than pre-filled with what the machine
+        already denotes. The rename prompt pre-fills because renaming is
+        editing a name that exists; this is not -- somebody choosing "from a
+        regular expression" has one in mind, and clearing forty characters of
+        somebody else's answer first would be work done to reach the blank
+        field they wanted.
+        """
+        self.ui_manager.show_regex_prompt()
+
+    def _build_from_regex(self, pattern: str) -> None:
+        """Replace the document with the machine ``pattern`` denotes.
+
+        Thompson's construction exactly as the engine gives it -- two states
+        per operator, epsilon moves at every join -- and deliberately not
+        determinized on the way in. That the shape of the machine mirrors the
+        shape of the expression is the thing worth seeing, and Determinize is
+        the next item up the same menu for when it stops being.
+        """
+        try:
+            machine = fsa.regex.to_nfa(pattern)
+        except fsa.regex.RegexSyntaxError as error:
+            # Shown, not swallowed, and shown in both places it is useful: the
+            # toast carries the sentence, and the prompt re-opens with the text
+            # that failed and a caret under the character that stopped it. The
+            # document is not touched -- a pattern that does not parse denotes
+            # nothing to replace it with.
+            self._show_message(f"Not a regular expression: {error}")
+            self.ui_manager.show_regex_prompt(pattern, error=str(error),
+                                              error_at=error.position)
+            return
+
+        # An empty pattern is ε and prints as nothing at all, so the message
+        # names the character rather than leaving a gap where the answer was.
+        shown = pattern or fsa.regex.EMPTY_WORD
+        self._replace_automaton(machine, f"regex {shown}")
+        self._show_message(
+            f"'{shown}' built {len(machine.states)} states by Thompson's "
+            f"construction -- determinize to tidy it")
+
+    def _denoted_pattern(self) -> str:
+        """The regular expression the machine on the canvas denotes.
+
+        Derived on demand and never stored on the document: an expression kept
+        beside the machine would be a second copy of one fact, with its own
+        chance to fall out of step -- which is precisely the mistake this
+        program keeps relearning (docs/LESSONS.md).
+
+        Cached on the automaton *value*, the way :meth:`EditorModel.analysis`
+        is. The value is immutable, so an identity check is the whole of the
+        invalidation rule and there is no flag anyone can forget to clear. It
+        also means dragging a state costs nothing here: a move produces a new
+        layout and the same machine.
+        """
+        automaton = self.editor.automaton
+        cached = self._cached_pattern
+        if cached is not None and cached[0] is automaton:
+            return cached[1]
+
+        if automaton.initial is None:
+            # `from_automaton` answers ∅ here and says in its docstring that a
+            # front end which cares should ask first. This one cares: ∅ is the
+            # empty language, and a machine with nowhere to start has no
+            # language yet rather than the empty one.
+            text = "none"
+        elif _elimination_cost(automaton) > ELIMINATION_BUDGET:
+            text = "too big to derive"
+        else:
+            expression = fsa.regex.from_automaton(automaton)
+            text = (expression if len(expression) <= PATTERN_DISPLAY_LIMIT
+                    else expression[:PATTERN_DISPLAY_LIMIT] + "...")
+
+        self._cached_pattern = (automaton, text)
+        return text
+
     def _focus_states(self, states: List[str]) -> None:
         """Glide the camera to the states a diagnostic names."""
         positions = [self.editor.position_of(s) for s in states
@@ -1038,6 +1158,11 @@ class AutomatonSimulator:
             MenuItem("Minimise", events.MinimizeAutomaton()),
             MenuItem("Marking table", events.ShowMarkingTable()),
             MenuItem("Trim", events.TrimAutomaton()),
+            # Beside the constructions rather than beside "Add state here":
+            # this is the other direction of the same theorem the rest of the
+            # group belongs to, and the status panel's Denotes row is the
+            # return trip.
+            MenuItem("From regular expression...", events.RegexPrompt()),
             MenuItem(SEPARATOR),
             MenuItem("Fit to content", events.FitView()),
         ])
@@ -1568,6 +1693,13 @@ class AutomatonSimulator:
         # The diagnostics panel reads the editor's cached analysis; feeding it
         # here keeps the UI a consumer of facts rather than a computer of them.
         self.ui_manager.diagnostics = self.editor.defects()
+        # Same arrangement for the expression the machine denotes, with one
+        # extra condition: it is only derived while the panel that shows it is
+        # open, because state elimination is the one thing on this path that
+        # can cost more than a frame.
+        self.ui_manager.derived_pattern = (
+            self._denoted_pattern() if self.ui_manager.wants_derived_pattern()
+            else "")
 
         self.ui_manager.draw(self.editor.automaton, self.ui_manager.test_result,
                              self.animation_active, self.execution_active)

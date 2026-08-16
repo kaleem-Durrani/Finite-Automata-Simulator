@@ -26,6 +26,10 @@ then step through how a string is processed, one symbol at a time.
   automatically, and labels on plates so they stay legible where edges cross
 - **Configurable symbol palette** — `a`, `b`, `0`, `1` by default; more can be added at runtime
 - **Context menus** — right-click a state to change its type or delete it
+- **Regular expressions, both ways** — a pattern becomes a machine by Thompson's
+  construction, and a machine becomes a pattern by state elimination. That round
+  trip is Kleene's theorem, and it is checked against `greenery` rather than
+  against itself
 - **Nondeterminism** — NFAs with ε-moves in the engine, and the subset
   construction that turns one into an equivalent DFA. The generated states are
   named for the subset they came from (`{q0,q2}`), because seeing *where* a DFA
@@ -174,6 +178,8 @@ fsa run      machine.json 0110    # ...and show every step
 fsa check    machine.json         # structural problems; exit 1 if any
 fsa show     machine.json         # the transition table
 fsa sample   machine.json -n 10   # words it accepts, shortest first
+fsa from-regex "a*b+"             # the machine a pattern denotes
+fsa to-regex   machine.json       # the pattern a machine denotes
 fsa determinize nfa.json          # subset construction: NFA -> DFA
 fsa minimize machine.json         # merge states no word can tell apart
 fsa complete machine.json         # route undefined pairs to a trap

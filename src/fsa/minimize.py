@@ -37,6 +37,12 @@ Pair = Tuple[StateId, StateId]
 #: The only method implemented. See the module docstring for why there is one.
 MOORE = "moore"
 
+#: Longest merged class name worth showing. "q1+q2" says which states
+#: became one, which is the reason the label exists at all; a compounded
+#: set name -- what minimising the subset construction produces -- is
+#: noise no canvas can fit, so the state keeps its own id instead.
+MAX_MERGED_LABEL = 24
+
 
 def _canonical(first: StateId, second: StateId) -> Pair:
     """The pair ``{first, second}`` written the one agreed way: sorted."""
@@ -415,8 +421,15 @@ def quotient(table: MarkingTable) -> DFA:
     for members in classes:
         chosen = min(members)
         if len(members) > 1:
-            labels[chosen] = "+".join(
+            merged = "+".join(
                 prepared.label_of(member) for member in sorted(members))
+            # A name nobody can read teaches nothing. Minimising the output of
+            # the subset construction compounds names that are already sets --
+            # "{q0,q1,q2,q4,q6,q8}+{q1,q3,q5}" -- and on a canvas those run
+            # into each other into one unreadable strip. "q1+q2" is worth
+            # showing; that is not, so the state keeps its own id instead.
+            if len(merged) <= MAX_MERGED_LABEL:
+                labels[chosen] = merged
         elif chosen in prepared.labels:
             # Only carry a label that was really there. Writing the id back
             # would look identical on screen but count as an edit -- see

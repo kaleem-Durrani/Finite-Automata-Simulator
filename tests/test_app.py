@@ -2617,3 +2617,315 @@ def test_a_long_label_is_not_elided_away(app):
     # The wider budget the below-the-node path uses keeps it whole.
     assert renderer_module._elide(
         font, long_name, default_state_radius() * 6.0) == long_name
+
+
+# ---------------------------------------------------------------------------
+# Regular expressions, both directions (phase 13)
+# ---------------------------------------------------------------------------
+
+
+def type_pattern(app: AutomatonSimulator, pattern: str) -> None:
+    """Type a pattern into the open prompt and press Enter.
+
+    Character by character through the real key path, because the thing worth
+    proving is that the prompt takes the characters a regular expression is
+    made of. `*`, `|` and `(` are not letters, and the field they share
+    machinery with had only ever held filenames.
+    """
+    for char in pattern:
+        press(app, ord(char), char)
+    press(app, pygame.K_RETURN, "\r")
+
+
+def open_regex_prompt(app: AutomatonSimulator) -> None:
+    """Right-click the empty canvas and choose the regular-expression item."""
+    click(app, canvas_point(app, 0.5), button=3)
+    click(app, menu_row(app, "From regular expression..."))
+
+
+def test_the_canvas_menu_offers_a_regular_expression_beside_the_others(app):
+    """It belongs with Determinize and Minimise: same theorem, other direction.
+
+    Asserted on the real menu rather than on the handler, because a menu item
+    with no route to it is the failure this whole event scheme exists to make
+    impossible.
+    """
+    click(app, canvas_point(app, 0.5), button=3)
+    labels = [item.label for item in app.ui_manager.context_menu.items]
+
+    assert "From regular expression..." in labels
+    assert labels.index("Trim") < labels.index("From regular expression...")
+
+    click(app, menu_row(app, "From regular expression..."))
+    assert app.ui_manager.file_prompt_mode == "regex"
+    assert app.ui_manager.file_prompt_text == "", "the field starts blank"
+
+
+def test_typing_a_pattern_produces_a_drawable_laid_out_machine(app):
+    """Phase 13 exit criterion 4, driven through the menu and the keyboard.
+
+    Drawable means all three of: the states exist, no two of them are stacked
+    on the origin, and every one is inside the window once the view has
+    settled. Thompson's construction places nothing itself, so without a
+    generated layout the whole machine would be a single disc.
+    """
+    open_regex_prompt(app)
+    type_pattern(app, "(a|b)*abb")
+    pump(app, frames=60)
+
+    automaton = app.editor.automaton
+    assert len(automaton.states) == 14, "Thompson's machine for this pattern"
+    assert sorted(automaton.alphabet) == ["a", "b"]
+
+    positions = app.editor.positions()
+    assert len(set(positions.values())) == len(positions), "states are stacked"
+
+    scene = app._build_scene()
+    assert len(scene.nodes) == len(automaton.states)
+    assert scene.edges, "nothing to draw between them"
+    assert scene.start_marker is not None
+
+    width, height = app.screen.get_size()
+    for state, point in positions.items():
+        x, y = app.renderer.camera.world_to_screen(point)
+        assert 0 <= x <= width and 0 <= y <= height, f"{state} is off screen"
+
+    deterministic = fsa.determinize(automaton)
+    for word in ["abb", "aabb", "babb", "", "ab", "abba"]:
+        assert fsa.accepts(deterministic, word) == word.endswith("abb")
+
+
+def test_a_malformed_pattern_reports_where_and_changes_nothing(app):
+    """The parser knows which character stopped it, so the message says so.
+
+    "Invalid syntax" sends a student back to stare at the whole line; this one
+    names the bracket. And nothing about the document moves -- a pattern that
+    does not parse denotes no machine to replace it with.
+    """
+    before = app.editor.document
+    open_regex_prompt(app)
+    type_pattern(app, "(a|b")
+    pump(app, frames=5)
+
+    assert app.editor.document is before, "a failed parse edited the document"
+    assert "position 0" in app.message_text
+    assert "never closed" in app.message_text
+    assert not app.editor.dirty
+
+
+def test_the_failed_pattern_stays_in_the_prompt_with_the_caret_on_it(app):
+    """A toast fades in two seconds and takes the position with it, so the
+    prompt re-opens holding the text that failed and the index to point at --
+    which makes fixing a typo an edit rather than a retype."""
+    open_regex_prompt(app)
+    type_pattern(app, "a|*b")
+
+    assert app.ui_manager.file_prompt_mode == "regex"
+    assert app.ui_manager.file_prompt_text == "a|*b"
+    assert app.ui_manager.regex_error_at == 2, "the '*' with nothing before it"
+    assert "position 2" in app.ui_manager.regex_error
+    pump(app, frames=3)  # the dialog draws its caret without raising
+
+    press(app, pygame.K_BACKSPACE)
+    assert app.ui_manager.regex_error_at is None, "the caret outlived its text"
+    assert app.ui_manager.regex_error == ""
+
+
+def test_the_empty_pattern_is_the_empty_word_and_not_a_cancelled_prompt(app):
+    """`fsa.regex.parse` reads an empty pattern as the empty word on purpose.
+    The interface has no business overruling that -- a prompt that quietly
+    meant "cancel" would put the front end and the engine at odds about what
+    was typed."""
+    open_regex_prompt(app)
+    press(app, pygame.K_RETURN, "\r")
+    pump(app, frames=5)
+
+    automaton = app.editor.automaton
+    assert automaton.alphabet == frozenset(), "the empty word mentions no symbols"
+    assert fsa.nfa.accepts(automaton, "")
+    assert app._denoted_pattern() == fsa.regex.EMPTY_WORD
+
+
+def test_building_from_a_pattern_is_one_undoable_edit(app):
+    """Every other construction on that menu is; this one replaces the whole
+    document, which is the case where getting it back matters most."""
+    before = app.editor.document
+    app._process_ui_events([events.BuildFromRegex("a*b+")])
+    pump(app, frames=5)
+    assert app.editor.document != before
+
+    chord(app, pygame.K_z, pygame.KMOD_CTRL)
+    assert app.editor.document == before
+    assert "regex a*b+" in app.message_text
+
+
+def test_the_status_panel_says_what_the_machine_denotes(app):
+    """The bundled demo is a*b+ and now says so. Read off the drawing by state
+    elimination, not remembered from anywhere -- nobody ever typed it."""
+    pump(app, frames=3)
+
+    assert app._denoted_pattern() == "a*b+"
+    assert app.ui_manager.derived_pattern == "a*b+"
+
+
+def test_the_denoted_row_is_painted_and_not_merely_computed(app):
+    """Two runs of the whole interface differing in nothing but the derived
+    expression. Identical pixels would mean the value was being computed and
+    then thrown away."""
+    pump(app, frames=40)  # let the column finish sliding in
+
+    def painted(pattern: str) -> bytes:
+        app.renderer.clear()
+        app.ui_manager.derived_pattern = pattern
+        app.ui_manager.draw(app.editor.automaton)
+        return pygame.image.tostring(app.screen, "RGB")
+
+    assert painted("a*b+") != painted("(a|b)*")
+
+
+def test_the_denoted_expression_never_reaches_the_document(app, tmp_path):
+    """Derived, so it is computed where it is shown and stored nowhere. A copy
+    beside the machine would be a second version of one fact with its own
+    chance to go stale, which is the mistake this program keeps relearning."""
+    before = app.editor.document
+    assert app._denoted_pattern() == "a*b+"
+    assert app.editor.document is before, "asking changed the document"
+
+    path = tmp_path / "saved.json"
+    ok, error = serialize.save_or_error(app.editor.document, str(path))
+    assert ok, error
+    assert "a*b+" not in path.read_text(encoding="utf-8")
+
+    reloaded, error = serialize.load_or_error(str(path))
+    assert reloaded == before, error
+
+
+def test_the_derived_expression_is_computed_once_per_machine(app, monkeypatch):
+    """Cached on the automaton value, like the editor's analysis. It is read
+    every frame, and state elimination sixty times a second on a machine
+    nobody has touched is the cost this row could easily have been."""
+    calls = []
+    real = fsa.regex.from_automaton
+
+    def counted(automaton):
+        calls.append(automaton)
+        return real(automaton)
+
+    monkeypatch.setattr(fsa.regex, "from_automaton", counted)
+
+    pump(app, frames=20)
+    assert len(calls) == 1, "recomputed every frame"
+
+    app.editor.begin_drag("q0", app.editor.position_of("q0"))
+    app.editor.update_drag((640.0, 480.0))
+    app.editor.end_drag()
+    pump(app, frames=5)
+    assert len(calls) == 1, "a drag changes the layout, not the machine"
+
+    app._process_ui_events([events.ToggleAccept("q2")])
+    pump(app, frames=5)
+    assert len(calls) == 2, "the machine changed and the expression did not"
+
+
+def test_a_folded_status_panel_costs_no_state_elimination(app, monkeypatch):
+    """The row is the only reason to derive one, so folding the panel away is
+    a way out of the cost that needs no explaining to anybody."""
+    def refuse(_automaton):
+        pytest.fail("derived an expression nothing was going to show")
+
+    monkeypatch.setattr(fsa.regex, "from_automaton", refuse)
+    app.ui_manager.column_state.collapsed["status"] = True
+    pump(app, frames=10)
+
+    assert app.ui_manager.derived_pattern == ""
+
+
+def dense_document(states: int, symbols: str) -> fsa.Document:
+    """A complete deterministic machine dense enough to be expensive.
+
+    Deliberately not random: the point of the machines below is how much work
+    state elimination would be on them, and a seeded shuffle would make that a
+    property of the seed.
+    """
+    document = fsa.Document()
+    for symbol in symbols:
+        document = document.add_symbol(symbol)
+    for _ in range(states):
+        document, _ = document.add_state((0.0, 0.0))
+
+    automaton = document.automaton.with_initial("q0")
+    ids = sorted(automaton.states, key=lambda state: int(state[1:]))
+    for index, state in enumerate(ids):
+        for step, symbol in enumerate(symbols, start=2):
+            automaton = automaton.with_transition(
+                state, symbol, ids[(index * step + step) % states])
+    for state in ids[:max(1, states // 4)]:
+        automaton = automaton.with_accept(state)
+    return fsa.Document(automaton, fsa.Layout.auto(automaton), states)
+
+
+def test_a_machine_too_dense_to_describe_says_so_rather_than_freezing(app,
+                                                                     monkeypatch):
+    """State elimination's answer grows with the machine, and past a point it
+    is both slow and unreadable: forty states over three symbols takes about
+    half a second and produces well over a megabyte of expression. The row
+    declines instead, and the estimate that decides is cheap."""
+    document = dense_document(40, "abc")
+    app.editor.replace(document, None)
+
+    assert (main_module._elimination_cost(document.automaton)
+            > main_module.ELIMINATION_BUDGET)
+
+    def refuse(_automaton):
+        pytest.fail("derived an expression nobody could have read")
+
+    monkeypatch.setattr(fsa.regex, "from_automaton", refuse)
+    assert app._denoted_pattern() == "too big to derive"
+
+
+def test_a_long_expression_is_cut_before_it_reaches_the_panel(app):
+    """The panel trims a value to the column width one character and one font
+    render at a time, so the length handed to it is a per-frame cost."""
+    document = dense_document(16, "abc")
+    app.editor.replace(document, None)
+
+    full = fsa.regex.from_automaton(document.automaton)
+    assert len(full) > main_module.PATTERN_DISPLAY_LIMIT, "not a long one"
+    assert (main_module._elimination_cost(document.automaton)
+            <= main_module.ELIMINATION_BUDGET), "this one is meant to be derived"
+
+    shown = app._denoted_pattern()
+    assert shown == full[:main_module.PATTERN_DISPLAY_LIMIT] + "..."
+
+
+def test_a_machine_with_no_start_state_denotes_nothing_not_the_empty_language(app):
+    """The empty language is a language; "no initial state" is the absence of
+    one. The engine keeps that distinction everywhere else and
+    `from_automaton` cannot -- an expression can only denote a language -- so
+    the front end asks before calling."""
+    app.editor.replace(fsa.Document().add_symbol("a"), None)
+    assert app.editor.automaton.initial is None
+    assert app._denoted_pattern() == "none"
+
+    app._process_ui_events([events.BuildFromRegex(fsa.regex.EMPTY_LANGUAGE)])
+    pump(app, frames=3)
+    assert app._denoted_pattern() == fsa.regex.EMPTY_LANGUAGE, "which is a language"
+
+
+def test_a_machine_names_an_expression_that_builds_the_same_machine_back(app):
+    """Kleene's theorem, closed through the interface: a pattern becomes a
+    machine, the machine names an expression, and that expression builds a
+    machine accepting exactly the same words. Compared as languages and never
+    as strings -- the two expressions are not meant to be the same text."""
+    app._process_ui_events([events.BuildFromRegex("(a|b)*abb")])
+    pump(app, frames=5)
+    first = fsa.determinize(app.editor.automaton)
+
+    derived = app._denoted_pattern()
+    assert derived != "(a|b)*abb", "this trip is only interesting if it moves"
+
+    app._process_ui_events([events.BuildFromRegex(derived)])
+    pump(app, frames=5)
+    second = fsa.determinize(app.editor.automaton)
+
+    assert fsa.equivalent(first, second), fsa.counterexample(first, second)

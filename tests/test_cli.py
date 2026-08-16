@@ -16,7 +16,7 @@ import json
 import pytest
 
 import fsa
-from fsa import Document, serialize
+from fsa import Document, regex, serialize
 from fsa.cli import NO, OK, USAGE, main
 
 
@@ -325,6 +325,211 @@ def test_new_refuses_an_illegal_symbol(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# from-regex / to-regex
+#
+# The two halves of Kleene's theorem, so the tests are mostly about the seam
+# between them. Almost nothing here asserts the *spelling* of an expression:
+# one language has infinitely many, and a test that pinned the string would
+# freeze state elimination around whatever it happened to emit first. What is
+# asserted is the language, decided on the machines, and the exit codes.
+# ---------------------------------------------------------------------------
+
+
+def a_pattern_machine(pattern, tmp_path, name="built.json"):
+    """``fsa from-regex pattern -o <file>``; returns the path, as a string."""
+    target = tmp_path / name
+    assert run("from-regex", pattern, "-o", str(target))[0] == OK
+    return str(target)
+
+
+def test_from_regex_writes_the_machine_a_pattern_denotes(tmp_path):
+    target = tmp_path / "built.json"
+    code, out, _ = run("from-regex", "a*b+", "-o", str(target))
+    assert code == OK
+    assert "wrote" in out
+
+    document = serialize.load(str(target))
+    assert sorted(document.automaton.alphabet) == ["a", "b"]
+    # Thompson's machine as it comes: the epsilon moves are the thing worth
+    # looking at, and the summary line names the verb that removes them.
+    assert not document.is_deterministic
+    assert "determinize" in out
+
+
+def test_the_machine_a_pattern_denotes_recognises_that_pattern(tmp_path):
+    """End to end and through the filesystem, which is how anyone chains these:
+    build the machine, determinize it, run words against it."""
+    built = a_pattern_machine("a*b+", tmp_path)
+    deterministic = tmp_path / "dfa.json"
+    assert run("determinize", built, "-o", str(deterministic))[0] == OK
+
+    for word in ("b", "ab", "aabbb", "bb"):
+        assert run("test", str(deterministic), word)[0] == OK, word
+    for word in ("", "a", "ba", "aba"):
+        assert run("test", str(deterministic), word)[0] == NO, word
+
+
+def test_from_regex_prints_the_document_when_no_path_is_given():
+    code, out, _ = run("from-regex", "ab")
+    assert code == OK
+    # The document follows the summary, the same way `determinize` prints one.
+    document = serialize.loads(out[out.index("{\n"):])
+    assert sorted(document.automaton.alphabet) == ["a", "b"]
+
+
+def test_a_malformed_pattern_exits_two_and_says_where(tmp_path):
+    """The parser names the character and its index. Swallowing that for a
+    tidier message would send a student back to stare at the whole line."""
+    target = tmp_path / "never-written.json"
+    code, out, err = run("from-regex", "a(b|c", "-o", str(target))
+    assert code == USAGE
+    assert "position 1" in err      # the bracket that opened, not the end
+    assert "^" in err               # ...and a caret under it
+    assert not target.exists()
+    assert out == ""
+
+
+def test_from_regex_gives_every_state_somewhere_to_be(tmp_path):
+    """A machine an algorithm built has no coordinates until Layout.auto gives
+    it some, and states with none all land on the origin in one pile, where
+    hit-testing finds the topmost and the rest are lost."""
+    document = serialize.load(a_pattern_machine("(a|b)*abb", tmp_path))
+    positions = document.layout.positions
+
+    assert set(positions) == set(document.automaton.states)
+    assert len(set(positions.values())) == len(positions)
+
+
+def test_to_regex_describes_the_machines_language(machine):
+    code, out, _ = run("to-regex", machine)
+    assert code == OK
+    rebuilt = fsa.determinize(regex.to_nfa(out.strip()))
+    assert fsa.equivalent(rebuilt, serialize.load(machine).as_dfa())
+
+
+def test_to_regex_accepts_a_nondeterministic_document(tmp_path):
+    """It is defined on both machines, and the one `from-regex` writes is
+    nondeterministic -- a verb that refused it would be refusing its own
+    output, and sending the user through a determinisation that cannot change
+    the answer."""
+    document = Document().add_symbol("a")
+    document, q0 = document.add_state((0.0, 0.0))
+    document, q1 = document.add_state((100.0, 0.0))
+    document = (document.add_transition(q0, "a", q0)
+                        .add_transition(q0, "a", q1)
+                        .add_transition(q0, None, q1)
+                        .toggle_accept(q1).set_initial(q0))
+    path = tmp_path / "nfa.json"
+    serialize.save(document, str(path))
+
+    code, out, _ = run("to-regex", str(path))
+    assert code == OK
+    rebuilt = fsa.determinize(regex.to_nfa(out.strip()))
+    assert fsa.equivalent(rebuilt, fsa.determinize(document.automaton))
+
+
+def test_to_regex_on_a_machine_that_accepts_nothing(tmp_path):
+    document = Document().add_symbol("a")
+    document, q0 = document.add_state((0.0, 0.0))
+    path = tmp_path / "nothing.json"
+    serialize.save(document.set_initial(q0), str(path))
+
+    code, out, _ = run("to-regex", str(path))
+    assert code == OK
+    assert out.strip() == regex.EMPTY_LANGUAGE
+
+
+def test_to_regex_on_a_machine_that_accepts_only_the_empty_word(tmp_path):
+    document = Document().add_symbol("a")
+    document, q0 = document.add_state((0.0, 0.0))
+    path = tmp_path / "epsilon.json"
+    serialize.save(document.set_initial(q0).toggle_accept(q0), str(path))
+
+    code, out, _ = run("to-regex", str(path))
+    assert code == OK
+    assert out.strip() == regex.EMPTY_WORD
+
+
+def test_an_expression_the_terminal_cannot_encode_falls_back_and_says_so(tmp_path):
+    """ε and ∅ are the two answers a Windows code page cannot print, and here
+    the character is the whole answer rather than a heading on a table.
+
+    Neither stand-in parses back, so the substitution is announced -- on
+    stderr, which is also cp1252 here, so the note has to name the codepoint
+    rather than show it or it would raise the very error it is explaining.
+    """
+    document = Document().add_symbol("a")
+    document, q0 = document.add_state((0.0, 0.0))
+    empty_word = tmp_path / "empty-word.json"
+    serialize.save(document.set_initial(q0).toggle_accept(q0), str(empty_word))
+    no_words = tmp_path / "no-words.json"
+    serialize.save(document.set_initial(q0), str(no_words))
+
+    for path, stood_in_for, codepoint in ((empty_word, "eps", "U+03B5"),
+                                          (no_words, "{}", "U+2205")):
+        streams = [io.BytesIO(), io.BytesIO()]
+        out, err = [io.TextIOWrapper(raw, encoding="cp1252", newline="")
+                    for raw in streams]
+        assert main(["to-regex", str(path)], out=out, err=err) == OK
+        out.flush()
+        err.flush()
+
+        printed, explained = [raw.getvalue().decode("cp1252")
+                              for raw in streams]
+        assert printed.strip() == stood_in_for
+        assert codepoint in explained
+
+
+def test_to_regex_without_an_initial_state_exits_two(tmp_path):
+    """"No language yet" is not "the empty language", and ∅ would claim it was.
+    The engine cannot keep that distinction -- an expression denotes a language
+    and "undefined" is not one -- so the CLI keeps it instead."""
+    document, _ = Document().add_state((0.0, 0.0))
+    path = tmp_path / "no_start.json"
+    serialize.save(document.set_initial(None), str(path))
+
+    code, out, err = run("to-regex", str(path))
+    assert code == USAGE
+    assert "no initial state" in err
+    assert out == ""
+
+
+def test_to_regex_minimize_is_exactly_minimising_the_machine_first(tmp_path):
+    """What the flag claims, as an equation between two ways of asking. Not
+    "the answer gets shorter" -- it usually does and sometimes does not, since
+    every loop in a small machine costs a star that a big tree of a machine
+    never pays -- but "the answer is the one the minimised machine gives"."""
+    built = a_pattern_machine("a*b+", tmp_path)
+    deterministic, smallest = tmp_path / "dfa.json", tmp_path / "min.json"
+    assert run("determinize", built, "-o", str(deterministic))[0] == OK
+    assert run("minimize", str(deterministic), "-o", str(smallest))[0] == OK
+
+    assert run("to-regex", built, "--minimize") == run("to-regex", str(smallest))
+
+
+def test_to_regex_minimize_keeps_the_language(machine):
+    code, out, _ = run("to-regex", machine, "--minimize")
+    assert code == OK
+    rebuilt = fsa.determinize(regex.to_nfa(out.strip()))
+    assert fsa.equivalent(rebuilt, serialize.load(machine).as_dfa())
+
+
+def test_a_pattern_survives_the_round_trip_through_files(tmp_path):
+    """Pattern -> machine -> pattern -> machine, entirely through the CLI, and
+    the two machines are compared by the CLI too."""
+    first = a_pattern_machine("(a|b)*abb", tmp_path, "first.json")
+
+    code, pattern, _ = run("to-regex", first)
+    assert code == OK
+    second = a_pattern_machine(pattern.strip(), tmp_path, "second.json")
+
+    left, right = tmp_path / "left.json", tmp_path / "right.json"
+    assert run("determinize", first, "-o", str(left))[0] == OK
+    assert run("determinize", second, "-o", str(right))[0] == OK
+    assert run("equiv", str(left), str(right))[0] == OK
+
+
+# ---------------------------------------------------------------------------
 # Plumbing
 # ---------------------------------------------------------------------------
 
@@ -337,7 +542,8 @@ def test_no_command_prints_help():
 
 def test_help_lists_every_command():
     code, out, _ = run()
-    for command in ("test", "run", "check", "sample", "export", "show", "new"):
+    for command in ("test", "run", "check", "sample", "export", "show", "new",
+                    "from-regex", "to-regex"):
         assert command in out
 
 

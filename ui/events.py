@@ -225,6 +225,32 @@ class ShowMarkingTable(UiEvent):
     The artifact Moore was chosen over Hopcroft to be able to show."""
 
 
+@dataclass(frozen=True)
+class RegexPrompt(UiEvent):
+    """Ask for a regular expression. Opens the prompt and builds nothing.
+
+    Split from :class:`BuildFromRegex` the way :class:`RenamePrompt` is split
+    from :class:`RenameState`: opening a dialog and acting on its answer are
+    two different requests, and a failed parse re-opens the prompt without
+    ever having been an edit.
+    """
+
+
+@dataclass(frozen=True)
+class BuildFromRegex(UiEvent):
+    """Replace the document with the machine ``pattern`` denotes.
+
+    ``pattern`` is unparsed text, deliberately. The engine owns the grammar and
+    is the only thing that should have an opinion about whether ``(a|b`` is a
+    regular expression -- the interface's job is to carry the characters and,
+    when the answer is no, to say where. An empty pattern is *not* a cancelled
+    prompt: it is ``ε``, the empty word, which is what :func:`fsa.regex.parse`
+    reads it as and what the machine built from it accepts.
+    """
+
+    pattern: str
+
+
 # ----------------------------------------------------------------------
 # Camera and messages
 # ----------------------------------------------------------------------

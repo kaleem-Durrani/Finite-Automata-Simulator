@@ -75,8 +75,14 @@ def _deterministic(automaton: "fsa.AnyAutomaton") -> bool:
 
 def draw_status(chrome: Chrome, *, rect: pygame.Rect, automaton: "fsa.AnyAutomaton",
                 warn_no_accepting: bool, collapsed: bool, layout: LayoutSpec,
+                pattern: str = "",
                 mouse_pos: Optional[Tuple[int, int]] = None) -> None:
-    """Draw status information about the current automaton."""
+    """Draw status information about the current automaton.
+
+    ``pattern`` is the regular expression the machine denotes, derived by the
+    application and handed in rather than computed here -- the panel is a
+    consumer of facts, and this one costs a state elimination to establish.
+    """
     palette = chrome.palette
     body = panel_frame(chrome, key="status", rect=rect, collapsed=collapsed,
                        layout=layout, mouse_pos=mouse_pos)
@@ -97,6 +103,11 @@ def draw_status(chrome: Chrome, *, rect: pygame.Rect, automaton: "fsa.AnyAutomat
         # happens when a design choice is labelled a fault with a button
         # beside it -- see docs/LESSONS.md.
         ("Kind", "DFA" if _deterministic(automaton) else "NFA", False),
+        # The other half of Kleene's theorem, read off the drawing: the
+        # expression this machine denotes, beside the machine itself. Long
+        # ones are cut to the column width by the loop below, which is the
+        # same treatment the alphabet gets.
+        ("Denotes", pattern or "none", False),
     ]
 
     label_font = chrome.fonts.ui("small")

@@ -74,10 +74,10 @@ class ColumnState:
         return entry.value
 
 
-#: States, Alphabet, Start, Accepting, Kind. Counted rather than written as a
-#: literal, because adding the fifth row and leaving this at four clipped it
-#: off the bottom of a panel that was still laid out for four.
-STATUS_ROWS = 5
+#: States, Alphabet, Start, Accepting, Kind, Denotes. Counted rather than
+#: written as a literal, because adding the fifth row and leaving this at four
+#: clipped it off the bottom of a panel that was still laid out for four.
+STATUS_ROWS = 6
 
 
 def status_body_height(*, warn_no_accepting: bool) -> int:

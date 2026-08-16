@@ -21,7 +21,7 @@ import sys
 from typing import FrozenSet, List, Optional, Sequence, TextIO, Tuple
 
 import fsa
-from fsa import analysis, language, serialize
+from fsa import analysis, language, regex, serialize
 from fsa.export import FORMATS, render
 from fsa.nfa import EPSILON
 from fsa.symbols import StateId, Symbol
@@ -41,10 +41,45 @@ EPSILON_SHOWN = "ε"
 #: decoration -- see :func:`_epsilon_for`.
 EPSILON_ASCII = "eps"
 
+#: The same fallback for ``∅``, the empty language, which only
+#: :func:`fsa.regex.from_automaton` ever answers with. ``{}`` is how a set with
+#: nothing in it is written everywhere else in the subject, so it is one fewer
+#: spelling to learn -- but it is a *description*, not a pattern this program
+#: reads back. :func:`_pattern_for` is where that is said out loud.
+EMPTY_LANGUAGE_ASCII = "{}"
+
+#: The two characters :mod:`fsa.regex` reserves, each with the ASCII stand-in
+#: above and the name to call it by when the stand-in has to be explained. The
+#: character cannot appear in the explanation -- being unprintable here is the
+#: whole reason there is one -- so the codepoint is named instead.
+_SENTINELS: Tuple[Tuple[str, str, str], ...] = (
+    (regex.EMPTY_WORD, EPSILON_ASCII, "U+03B5, the empty word"),
+    (regex.EMPTY_LANGUAGE, EMPTY_LANGUAGE_ASCII, "U+2205, the empty language"),
+)
+
 
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+def _encodable(text: str, stream: TextIO) -> bool:
+    """Whether ``stream`` can actually write ``text``.
+
+    The question is asked of the stream rather than of the platform, so a
+    redirected file, a pipe or a UTF-8 terminal is never handed a fallback it
+    did not need, and only the one that genuinely cannot print a character
+    gets one. A stream that declares no encoding -- a ``StringIO``, or
+    anything a test drives -- is taken at its word and trusted with anything.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return True
+    try:
+        text.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
+
 
 def _epsilon_for(stream: TextIO) -> str:
     """``ε``, or an ASCII spelling where ``stream`` cannot encode it.
@@ -52,19 +87,43 @@ def _epsilon_for(stream: TextIO) -> str:
     A Windows console still defaults to a code page with no Greek in it, so
     printing the character raises ``UnicodeEncodeError`` partway through the
     output -- which is how ``fsa sample`` came to abort with a traceback on any
-    machine that accepts the empty word. The question is asked of the stream
-    rather than of the platform, so a redirected file, a pipe or a UTF-8
-    terminal still gets the real character, and only the one that genuinely
-    cannot print it gets the fallback.
+    machine that accepts the empty word.
     """
-    encoding = getattr(stream, "encoding", None)
-    if not encoding:
-        return EPSILON_SHOWN
-    try:
-        EPSILON_SHOWN.encode(encoding)
-    except (LookupError, UnicodeEncodeError):
-        return EPSILON_ASCII
-    return EPSILON_SHOWN
+    return EPSILON_SHOWN if _encodable(EPSILON_SHOWN, stream) else EPSILON_ASCII
+
+
+def _pattern_for(pattern: str, stream: TextIO) -> Tuple[str, Optional[str]]:
+    """``pattern`` as ``stream`` can print it, and a note if that changed it.
+
+    :func:`fsa.regex.from_automaton` answers ``ε`` for the language ``{""}``
+    and ``∅`` for ``{}``, so this verb walks into exactly the trap
+    :func:`_epsilon_for` was written for -- except that here the character is
+    the *whole answer* rather than a heading on a table, and the substitute is
+    not a pattern this program reads back: the grammar has no ASCII spelling of
+    either language, and inventing one would be a second syntax to teach for
+    the sake of one terminal. So the substitution is announced rather than made
+    quietly. The announcement comes back as a second value for the caller to
+    put on stderr, where whatever is reading the expression cannot mistake it
+    for part of one.
+
+    Only these two characters are substituted. A symbol the terminal cannot
+    encode came out of the user's own file and is theirs to look at -- the same
+    stance ``show`` and ``sample`` take. These two the tool invented.
+    """
+    if _encodable(pattern, stream):
+        return pattern, None
+
+    shown = pattern
+    named: List[str] = []
+    for character, ascii_form, description in _SENTINELS:
+        if character in pattern and not _encodable(character, stream):
+            shown = shown.replace(character, ascii_form)
+            named.append(f"'{ascii_form}' stands for {description}")
+    if not named:
+        # Something else in the pattern is unprintable, which means a symbol of
+        # the machine's own alphabet. Not this function's to rewrite.
+        return pattern, None
+    return shown, "this terminal cannot encode the expression; " + ", ".join(named)
 
 
 def _load(path: str, err: TextIO) -> Optional[fsa.Document]:
@@ -216,8 +275,9 @@ def _write_document(document: "fsa.Document", path: Optional[str],
 def cmd_determinize(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     """Turn a nondeterministic machine into an equivalent deterministic one.
 
-    The one verb that goes through :func:`_load` rather than :func:`_load_dfa`,
-    because a nondeterministic document is exactly what it is for.
+    Goes through :func:`_load` rather than :func:`_load_dfa`, because a
+    nondeterministic document is exactly what it is for -- as it is for
+    ``to-regex``, the other verb that has no need of a deterministic reading.
     """
     document = _load(args.file, err)
     if document is None:
@@ -302,6 +362,93 @@ def cmd_equiv(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         verdict = "accepts" if fsa.accepts(automaton, witness) else "rejects"
         print(f"  {name} {verdict} it", file=out)
     return NO
+
+
+def cmd_from_regex(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Build the machine a regular expression denotes.
+
+    Half of Kleene's theorem with a file on the end of it. What comes out is a
+    document like any other, so the next thing done to it can be ``fsa show``,
+    ``fsa determinize`` or the editor.
+
+    Thompson's machine is written out as it comes, epsilon moves and all,
+    rather than determinized on the way past. The shape of that machine mirrors
+    the shape of the expression -- which is the thing worth looking at, and the
+    reason the construction is taught -- and ``fsa determinize`` already exists
+    for the reader who wants it small. Doing it here would also hide which step
+    cost what, on the one verb where the exponential step is easiest to meet.
+    """
+    try:
+        automaton = regex.to_nfa(args.pattern)
+    except regex.RegexSyntaxError as exc:
+        # The parser's message names the character and its index; the caret
+        # puts a mark under that index. Both go to stderr, so a caller who
+        # redirected stdout to a file still finds out why it is empty.
+        print(f"{PROGRAM}: {exc}", file=err)
+        print(exc.caret(), file=err)
+        return USAGE
+
+    # Every state here was invented by the construction seconds ago, so there
+    # is no hand-placed coordinate to preserve and nothing to lay out around.
+    document = fsa.Document.of(automaton, fsa.Layout.auto(automaton))
+    print(_describe(automaton), file=out)
+    if not document.is_deterministic:
+        # The same courtesy _load_dfa pays: name the command that unblocks the
+        # verb the user is about to reach for. Every pattern with an operator
+        # in it lands here, so being told once, now, beats being refused later.
+        print(f"nondeterministic, as Thompson's construction leaves it; "
+              f"'{PROGRAM} determinize' builds the machine the other verbs "
+              f"can run", file=out)
+    return _write_document(document, args.output, out, err)
+
+
+def cmd_to_regex(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Print a regular expression denoting the machine's language.
+
+    The other half of Kleene's theorem, and like ``determinize`` it reads its
+    file through :func:`_load` rather than :func:`_load_dfa`: state elimination
+    never asks whether a move has a choice to make, so it is defined on a
+    nondeterministic document as it stands -- which is exactly what the machine
+    ``fsa from-regex`` just wrote is. Refusing that one would send someone
+    through a determinisation that cannot change the answer.
+
+    Stdout is the expression and nothing else, so ``pattern=$(fsa to-regex
+    m.json)`` works. Anything to say *about* the expression is said on stderr.
+    """
+    document = _load(args.file, err)
+    if document is None:
+        return USAGE
+
+    automaton = document.automaton
+    if automaton.initial is None:
+        # from_automaton answers ∅ here, and repeating that would be a lie the
+        # engine is careful not to tell: a machine with no initial state has no
+        # language *yet*, which is a different thing from the language with no
+        # words in it. The engine cannot keep the distinction -- an expression
+        # denotes a language and "undefined" is not one -- so the CLI keeps it.
+        print(f"{PROGRAM}: no initial state, so there is no language to "
+              f"describe", file=err)
+        return USAGE
+
+    # The expression tracks the machine it was given, so a smaller machine is
+    # the road to a shorter expression -- usually. Measured, not assumed, and
+    # it does not always hold: on `(a|b)*abb` the minimal four-state DFA
+    # eliminates to 31 characters where Thompson's fourteen-state tree gives
+    # 13, because every loop costs a star and a tree has none. That is one
+    # reason this is a flag: it offers a different description of the same
+    # language, and which of the two reads better is not a question the verb
+    # can answer on the user's behalf. The other is that the subset
+    # construction is exponential in the worst case, and a verb that usually
+    # answers at once and occasionally takes a minute is one nobody puts in a
+    # loop.
+    machine: fsa.AnyAutomaton = (
+        fsa.minimize(fsa.determinize(automaton)) if args.minimize else automaton)
+
+    pattern, note = _pattern_for(regex.from_automaton(machine), out)
+    if note is not None:
+        print(f"{PROGRAM}: {note}", file=err)
+    print(pattern, file=out)
+    return OK
 
 
 def cmd_export(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
@@ -523,6 +670,21 @@ def build_parser() -> argparse.ArgumentParser:
     equiv.add_argument("left")
     equiv.add_argument("right")
     equiv.set_defaults(handler=cmd_equiv)
+
+    from_regex = subs.add_parser(
+        "from-regex", help="build the machine a regular expression denotes")
+    from_regex.add_argument("pattern")
+    from_regex.add_argument("-o", "--output",
+                            help="write here instead of printing the document")
+    from_regex.set_defaults(handler=cmd_from_regex)
+
+    to_regex = subs.add_parser(
+        "to-regex", help="print a regular expression for the language")
+    to_regex.add_argument("file")
+    to_regex.add_argument("--minimize", action="store_true",
+                          help="describe the minimised machine instead: the "
+                               "same language, usually shorter")
+    to_regex.set_defaults(handler=cmd_to_regex)
 
     export = subs.add_parser("export", help="write a diagram")
     export.add_argument("file")

@@ -105,10 +105,17 @@ class UIManager:
         self.adding_symbol = False
         self.new_symbol_input = ""
 
-        # Filename prompt state ('save' | 'load' | 'rename' | None)
+        # Filename prompt state ('save' | 'load' | 'rename' | 'regex' | None)
         self.file_prompt_mode: Optional[str] = None
         self.file_prompt_text = ""
         self.rename_target = ""
+
+        # Why the last pattern would not parse, and which character stopped it.
+        # Kept so the prompt can re-open pointing at the offending character:
+        # a syntax error that only ever appeared in a toast would fade in two
+        # seconds, taking the position with it.
+        self.regex_error = ""
+        self.regex_error_at: Optional[int] = None
 
         # Confirmation dialog state; confirm_intent names the action being
         # guarded so the app layer decides what "yes" means.
@@ -142,6 +149,13 @@ class UIManager:
         # Structural problems with the automaton, set by the app each frame
         # from the editor's cached analysis. Drives the diagnostics panel.
         self.diagnostics: Tuple[Any, ...] = ()
+
+        # The regular expression the machine on the canvas denotes, set by the
+        # app each frame beside `diagnostics` and for the same reason: it is
+        # derived from the automaton, so the interface reports it and never
+        # keeps it. Empty means "not asked for this frame" -- the app skips the
+        # derivation while the status panel is folded away.
+        self.derived_pattern = ""
 
         # Side panels slide in and out rather than popping. Each panel key maps
         # to an Animated 0..1; 1 is fully on screen. The column layout also
@@ -448,6 +462,17 @@ class UIManager:
     # ------------------------------------------------------------------
     # The sliding right column
     # ------------------------------------------------------------------
+
+    def wants_derived_pattern(self) -> bool:
+        """Whether the status panel is open far enough to show a pattern.
+
+        Asked by the application before it derives one. Deriving a regular
+        expression from a machine costs real time on a large one, and there is
+        no reason to spend it on a row folded away behind a header -- so the
+        panel being open is the switch, and folding it is a way out of the cost
+        the user can find without being told about it.
+        """
+        return not self.column_state.is_collapsed("status")
 
     def opaque_panels(self) -> List[pygame.Rect]:
         """The UI regions currently painted over the canvas.
@@ -814,10 +839,30 @@ class UIManager:
         self.file_prompt_text = "" if current_label == state else current_label
         self.input_active = False
 
+    def show_regex_prompt(self, pattern: str = "", *, error: str = "",
+                          error_at: Optional[int] = None):
+        """Open the prompt that builds a machine from a regular expression.
+
+        Rides the filename prompt's machinery -- same modal frame, same keys,
+        same submit path -- for the reason the rename prompt does: it is one
+        line of text and a verb, and a second modal would be a second thing to
+        keep in step with the first.
+
+        Re-opened with ``error`` after a pattern fails to parse, carrying the
+        text that failed so the fix is an edit rather than a retype.
+        """
+        self.file_prompt_mode = "regex"
+        self.file_prompt_text = pattern
+        self.regex_error = error
+        self.regex_error_at = error_at
+        self.input_active = False
+
     def hide_file_prompt(self):
         """Close the filename prompt."""
         self.file_prompt_mode = None
         self.file_prompt_text = ""
+        self.regex_error = ""
+        self.regex_error_at = None
 
     def show_confirm(self, message: str, intent: str):
         """Open a yes/no dialog guarding `intent`."""
@@ -857,6 +902,12 @@ class UIManager:
             # An empty name is a deliberate reset to the state's own id, so it
             # is not a cancel.
             return [events.RenameState(target, name)]
+        if mode == 'regex':
+            # Also not guarded on being non-empty. The empty pattern is ε, the
+            # empty word -- that is what fsa.regex.parse reads it as, on
+            # purpose -- so treating it as a cancel here would make the
+            # interface disagree with the engine about what was typed.
+            return [events.BuildFromRegex(name)]
         if not name:
             return []
         return [events.SaveToPath(name) if mode == 'save'
@@ -870,14 +921,26 @@ class UIManager:
             return self._submit_file_prompt()
         elif event.key == pygame.K_BACKSPACE:
             self.file_prompt_text = self.file_prompt_text[:-1]
+            self._clear_regex_error()
         elif event.unicode.isprintable():
             # A path may reasonably be long; a state's display name has a
             # circle to fit inside, and the renderer will elide what does not.
             limit = RENAME_LABEL_LIMIT if self.file_prompt_mode == "rename" else 120
             if len(self.file_prompt_text) < limit:
                 self.file_prompt_text += event.unicode
+                self._clear_regex_error()
 
         return []
+
+    def _clear_regex_error(self) -> None:
+        """Forget the last parse failure, because the text just changed.
+
+        The caret points at a position in the pattern that failed; one
+        keystroke later that position may hold a different character, or none,
+        and a marker under the wrong one is a worse answer than no marker.
+        """
+        self.regex_error = ""
+        self.regex_error_at = None
 
     def _handle_confirm_key(self, event) -> Events:
         """Handle keys while the confirmation dialog is open."""
@@ -1024,6 +1087,7 @@ class UIManager:
             if key == "status":
                 column.draw_status(chrome, rect=rect, automaton=automaton,
                                    warn_no_accepting=self.warn_no_accepting,
+                                   pattern=self.derived_pattern,
                                    collapsed=bool(self.column_state.collapsed.get(key)),
                                    layout=self.layout, mouse_pos=mouse_pos)
             elif key == "diagnostics":
@@ -1082,6 +1146,8 @@ class UIManager:
                 file_prompt_mode=self.file_prompt_mode,
                 file_prompt_text=self.file_prompt_text,
                 rename_target=self.rename_target,
+                regex_error=self.regex_error,
+                regex_error_at=self.regex_error_at,
                 pressed_rect=self._pressed_rect, mouse_pos=mouse_pos)
 
         if self.confirm_intent:

@@ -20,7 +20,17 @@ NFA always, and hands out the deterministic reading through
 names the pair, for the few functions that read only what both expose.
 """
 
-from fsa import equivalence, export, geometry, language, nfa, ops, product, subset
+from fsa import (
+    equivalence,
+    export,
+    geometry,
+    language,
+    nfa,
+    ops,
+    product,
+    regex,
+    subset,
+)
 from fsa.analysis import (
     Defect,
     co_reachable,
@@ -83,6 +93,7 @@ __all__ = [
     "product",
     "equivalence",
     "nfa",
+    "regex",
     "subset",
     "NFA",
     "AnyAutomaton",

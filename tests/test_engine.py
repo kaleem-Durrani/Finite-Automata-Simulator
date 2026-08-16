@@ -573,7 +573,11 @@ def test_engine_uses_only_the_standard_library():
     import ast
     import pathlib
 
-    banned = {"pygame", "networkx", "numpy", "automata", "frozendict"}
+    # `greenery` converts regex to FSM and back, which is exactly what
+    # fsa.regex does, so it is the one package most tempting to reach for and
+    # the one that would hollow the module out. It is a test oracle only.
+    banned = {"pygame", "networkx", "numpy", "automata", "frozendict",
+              "greenery", "hypothesis", "lark", "pydot", "graphviz"}
     engine = pathlib.Path(fsa.__file__).parent
 
     offenders = []

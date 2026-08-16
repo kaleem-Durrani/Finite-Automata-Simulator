@@ -253,8 +253,13 @@ class Renderer:
         # came from, and seeing that is the entire lesson of the algorithm --
         # but "{q0,q1}" and "{q0,q2}" both elide to "{q0,q...", so the drawing
         # stopped distinguishing the states it had just built.
+        # Bounded to roughly the spacing between two states, so a row of
+        # long names cannot run together into one strip -- which is what a
+        # determinized-then-minimised machine produces, every id being a set.
+        # "{q0,q1}" and "{q0,q1,q2}" still fit whole, which is the case the
+        # below-the-node treatment exists for.
         surface = font.render(
-            _elide(font, node.label, max(inside, radius * 6.0)), True,
+            _elide(font, node.label, max(inside, radius * 4.0)), True,
             palette.label_text)
         rect = surface.get_rect(
             center=(int(centre[0]), int(centre[1] + radius + surface.get_height())))

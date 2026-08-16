@@ -22,6 +22,11 @@ from ui.widgets import Chrome
 CONFIRM_DIALOG_SIZE = (420, 172)
 FILE_PROMPT_SIZE = (440, 200)
 
+#: What the regular-expression prompt says about the syntax when it has no
+#: complaint to make instead. Four operators and the one rule nobody guesses:
+#: an empty pattern is the empty word, not a cancelled dialog.
+REGEX_HINT = "| choice, * + ? repetition, () grouping. Empty means ε."
+
 
 # ----------------------------------------------------------------------
 # Where a dialog sits
@@ -106,21 +111,36 @@ def draw_file_prompt(chrome: Chrome, *, layout: LayoutSpec,
                      screen_width: int, screen_height: int,
                      file_prompt_mode: Optional[str], file_prompt_text: str,
                      rename_target: str = "",
+                     regex_error: str = "",
+                     regex_error_at: Optional[int] = None,
                      pressed_rect: Optional[pygame.Rect] = None,
                      mouse_pos: Optional[Tuple[int, int]] = None) -> None:
-    """Draw the filename prompt (or its rename variant)."""
+    """Draw the filename prompt, or one of its rename and regex variants."""
     titles = {"save": "Save as", "load": "Load file",
-              "rename": f"Rename {rename_target}"}
-    rect = draw_modal_frame(chrome, 440, 160, titles.get(file_prompt_mode or '', ""),
+              "rename": f"Rename {rename_target}",
+              "regex": "From a regular expression"}
+    # Drawn at the size :func:`file_prompt_rect` reports, which is what
+    # hit-testing uses. They were 160 and 200, so every button in this dialog
+    # was drawn twenty pixels below the rectangle that answered the click and
+    # only the bottom third of it could be pressed.
+    rect = draw_modal_frame(chrome, *FILE_PROMPT_SIZE,
+                            title=titles.get(file_prompt_mode or '', ""),
                             screen_width=screen_width,
                             screen_height=screen_height)
 
     palette = chrome.palette
-    if file_prompt_mode == "rename":
-        hint_text = "A display label. Leave empty to use the state's id."
-    else:
-        hint_text = "Relative to the project folder. '.json' is added if omitted."
-    hint = chrome.fonts.ui("small").render(hint_text, True, palette.text_muted)
+    small = chrome.fonts.ui("small")
+    budget = rect.width - chrome.space.lg * 2
+    hints = {"rename": "A display label. Leave empty to use the state's id.",
+             "regex": REGEX_HINT}
+    # The hint stays put when there is also a complaint to make, rather than
+    # being replaced by it: how to write one of these is exactly what somebody
+    # who has just written one wrong needs in front of them.
+    hint_text = hints.get(
+        file_prompt_mode or "",
+        "Relative to the project folder. '.json' is added if omitted.")
+    hint = small.render(widgets.elide(small, hint_text, budget), True,
+                        palette.text_muted)
     chrome.screen.blit(hint, (rect.x + chrome.space.lg, rect.y + 50))
 
     field = pygame.Rect(rect.x + chrome.space.lg, rect.y + 74,
@@ -131,16 +151,35 @@ def draw_file_prompt(chrome: Chrome, *, layout: LayoutSpec,
 
     # Show the tail of the text so the caret stays visible on long paths.
     shown = file_prompt_text[-40:]
-    text_surface = chrome.fonts.mono("input").render(shown, True, palette.text)
+    mono = chrome.fonts.mono("input")
+    text_surface = mono.render(shown, True, palette.text)
     text_rect = text_surface.get_rect(midleft=(field.left + 6, field.centery))
     chrome.screen.blit(text_surface, text_rect)
+
+    if file_prompt_mode == "regex" and regex_error:
+        # The complaint goes below the field, under the character it is about,
+        # in the space the button row was already leaving empty. The caret is
+        # drawn in the field's own face so the columns line up, and only while
+        # the whole pattern is on screen -- the field shows the tail of a long
+        # one, and a caret under the wrong character is worse than none.
+        if regex_error_at is not None and shown == file_prompt_text:
+            marker = mono.render("^", True, palette.warning)
+            marker_x = text_rect.left + mono.size(file_prompt_text[:regex_error_at])[0]
+            chrome.screen.blit(
+                marker, (min(marker_x, field.right - marker.get_width()),
+                         field.bottom - 3))
+        chrome.screen.blit(
+            small.render(widgets.elide(small, regex_error, budget), True,
+                         palette.warning),
+            (rect.x + chrome.space.lg, rect.y + 126))
 
     if pygame.time.get_ticks() % 1100 < 560:
         caret_x = min(text_rect.right + 2, field.right - 5)
         pygame.draw.line(chrome.screen, palette.accent,
                          (caret_x, field.top + 7), (caret_x, field.bottom - 7), 2)
 
-    verbs = {"save": "Save", "load": "Load", "rename": "Rename"}
+    verbs = {"save": "Save", "load": "Load", "rename": "Rename",
+             "regex": "Build"}
     cancel, confirm = layout.confirm_buttons(rect)
     if mouse_pos is None:
         mouse_pos = pygame.mouse.get_pos()
